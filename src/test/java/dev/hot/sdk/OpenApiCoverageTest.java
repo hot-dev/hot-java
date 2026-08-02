@@ -54,6 +54,9 @@ class OpenApiCoverageTest {
     coverage.put("GET /v1/runs", "runs.list");
     coverage.put("GET /v1/runs/stats", "runs.stats");
     coverage.put("GET /v1/runs/{run_id}", "runs.get");
+    coverage.put("GET /v1/runs/{run_id}/subscribe", "runs.subscribe");
+    coverage.put("GET /v1/tasks/{task_id}", "tasks.get");
+    coverage.put("GET /v1/tasks/{task_id}/subscribe", "tasks.subscribe");
     coverage.put("POST /v1/events", "events.publish");
     coverage.put("GET /v1/events", "events.list");
     coverage.put("GET /v1/events/{event_id}", "events.get");

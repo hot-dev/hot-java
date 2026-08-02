@@ -236,16 +236,10 @@ class ClientTest {
   @Test
   void callHotUsesNestedRunFailureResult() {
     server.stubFor(
-        post(urlPathEqualTo("/v1/events"))
-            .willReturn(
-                aResponse()
-                    .withHeader("Content-Type", "application/json")
-                    .withBody(
-                        envelope("{\"event_id\":\"evt_123\",\"stream_id\":\"str_123\"}"))));
-    server.stubFor(
-        get(urlPathEqualTo("/v1/streams/str_123/subscribe"))
+        post(urlPathEqualTo("/v1/streams/subscribe-with-event"))
             .willReturn(
                 sse(
+                    "{\"type\":\"event:published\",\"event_id\":\"evt_123\",\"stream_id\":\"str_123\"}",
                     "{\"type\":\"run:start\",\"run\":{\"run_id\":\"run_123\",\"event_id\":\"evt_123\"}}",
                     "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"run_123\",\"event_id\":\"evt_123\","
                         + "\"status\":\"failed\",\"result\":{\"$err\":{\"message\":\"boom\"}}}}")));
@@ -259,16 +253,10 @@ class ClientTest {
   @Test
   void callHotSurfacesHotRunFailureShape() {
     server.stubFor(
-        post(urlPathEqualTo("/v1/events"))
-            .willReturn(
-                aResponse()
-                    .withHeader("Content-Type", "application/json")
-                    .withBody(
-                        envelope("{\"event_id\":\"evt_123\",\"stream_id\":\"str_123\"}"))));
-    server.stubFor(
-        get(urlPathEqualTo("/v1/streams/str_123/subscribe"))
+        post(urlPathEqualTo("/v1/streams/subscribe-with-event"))
             .willReturn(
                 sse(
+                    "{\"type\":\"event:published\",\"event_id\":\"evt_123\",\"stream_id\":\"str_123\"}",
                     "{\"type\":\"run:start\",\"run\":{\"run_id\":\"run_123\",\"event_id\":\"evt_123\"}}",
                     "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"run_123\",\"event_id\":\"evt_123\","
                         + "\"status\":\"failed\",\"result\":{\"$type\":\"::hot::run/Failure\","
@@ -284,18 +272,13 @@ class ClientTest {
   @Test
   void callHotUnwrapsOkResultAndStreamsChunks() {
     server.stubFor(
-        post(urlPathEqualTo("/v1/events"))
+        post(urlPathEqualTo("/v1/streams/subscribe-with-event"))
             .withRequestBody(
                 equalToJson(
                     "{\"event_type\":\"hot:call\",\"event_data\":{\"fn\":\"demo/fn\",\"args\":[1,2]}}"))
             .willReturn(
-                aResponse()
-                    .withHeader("Content-Type", "application/json")
-                    .withBody(envelope("{\"event_id\":\"evt_1\",\"stream_id\":\"str_1\"}"))));
-    server.stubFor(
-        get(urlPathEqualTo("/v1/streams/str_1/subscribe"))
-            .willReturn(
                 sse(
+                    "{\"type\":\"event:published\",\"event_id\":\"evt_1\",\"stream_id\":\"str_1\"}",
                     "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"evt_1\"}}",
                     "{\"type\":\"stream:data\",\"run_id\":\"r1\",\"payload\":{\"text\":\"partial\"}}",
                     "{\"type\":\"run:stop\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"evt_1\","

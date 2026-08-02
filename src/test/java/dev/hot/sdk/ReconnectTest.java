@@ -62,13 +62,15 @@ class ReconnectTest {
     server.stubFor(
         post(urlPathEqualTo("/v1/streams/subscribe-with-event"))
             .willReturn(
-                ClientTest.sse(PUBLISHED, "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\"}}")));
+                ClientTest.sse(
+                    PUBLISHED,
+                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\"}}")));
     server.stubFor(
         get(urlPathEqualTo("/v1/streams/s1/subscribe"))
             .willReturn(
                 ClientTest.sse(
-                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\"}}",
-                    "{\"type\":\"run:stop\",\"run\":{\"run_id\":\"r1\",\"result\":\"done\"}}")));
+                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\"}}",
+                    "{\"type\":\"run:stop\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\",\"result\":\"done\"}}")));
 
     List<Map<String, Object>> events = collect(new SubscribeWithEventOptions());
 
@@ -82,7 +84,9 @@ class ReconnectTest {
     server.stubFor(
         post(urlPathEqualTo("/v1/streams/subscribe-with-event"))
             .willReturn(
-                ClientTest.sse(PUBLISHED, "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\"}}")));
+                ClientTest.sse(
+                    PUBLISHED,
+                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\"}}")));
 
     List<Map<String, Object>> events =
         collect(new SubscribeWithEventOptions().reconnect(false));
@@ -96,15 +100,18 @@ class ReconnectTest {
     server.stubFor(
         post(urlPathEqualTo("/v1/streams/subscribe-with-event"))
             .willReturn(
-                ClientTest.sse(PUBLISHED, "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\"}}")));
+                ClientTest.sse(
+                    PUBLISHED,
+                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\"}}")));
     server.stubFor(
         get(urlPathEqualTo("/v1/streams/s1/subscribe"))
             .willReturn(
                 ClientTest.sse(
-                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\"}}",
-                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r2\"}}",
-                    "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"r1\",\"result\":\"err\"}}",
-                    "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"r1\",\"result\":\"err\"}}")));
+                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\"}}",
+                    "{\"type\":\"run:start\",\"run\":{\"run_id\":\"r2\",\"event_id\":\"e2\"}}",
+                    "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"r2\",\"event_id\":\"e2\",\"result\":\"other\"}}",
+                    "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\",\"result\":\"err\"}}",
+                    "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"r1\",\"event_id\":\"e1\",\"result\":\"err\"}}")));
 
     List<Map<String, Object>> events = collect(new SubscribeWithEventOptions());
 
@@ -120,7 +127,7 @@ class ReconnectTest {
             .toList();
 
     assertEquals(List.of("r1", "r2"), startIds);
-    assertEquals(List.of("r1"), failIds);
+    assertEquals(List.of("r2", "r1"), failIds);
   }
 
   @Test

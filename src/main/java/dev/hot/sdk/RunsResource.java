@@ -1,6 +1,7 @@
 package dev.hot.sdk;
 
 import dev.hot.sdk.internal.Json;
+import dev.hot.sdk.internal.RunWaiter;
 import dev.hot.sdk.internal.Transport;
 import java.util.Map;
 
@@ -32,5 +33,22 @@ public final class RunsResource {
   public Map<String, Object> get(String runId) {
     return Json.dataObject(
         transport.requestJson("GET", "/runs/" + Transport.enc(runId), null, null));
+  }
+
+  /** Subscribes to durable snapshots of a single run. */
+  public StreamEvents subscribe(String runId) {
+    return transport.stream(
+        "GET", "/runs/" + Transport.enc(runId) + "/subscribe", null, null);
+  }
+
+  /** Waits until a run succeeds, fails, or is cancelled. */
+  public Map<String, Object> waitFor(String runId) {
+    return waitFor(runId, new RunWaitOptions());
+  }
+
+  /** Waits until a run is terminal, reconnecting according to {@code options}. */
+  public Map<String, Object> waitFor(String runId, RunWaitOptions options) {
+    return RunWaiter.waitForRun(
+        transport, runId, options.timeout(), options.maxAttempts());
   }
 }

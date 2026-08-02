@@ -26,6 +26,7 @@ public final class ReconnectingEvents implements StreamEvents {
   private StreamEvents source;
   private Map<String, Object> nextEvent;
   private String streamId;
+  private String eventId;
   private int attempts;
   private boolean terminal;
   private boolean done;
@@ -56,6 +57,9 @@ public final class ReconnectingEvents implements StreamEvents {
     }
     Map<String, Object> event = nextEvent;
     nextEvent = null;
+    if (terminal) {
+      close();
+    }
     return event;
   }
 
@@ -96,6 +100,9 @@ public final class ReconnectingEvents implements StreamEvents {
           if (event.get("stream_id") instanceof String published) {
             streamId = published;
           }
+          if (event.get("event_id") instanceof String published) {
+            eventId = published;
+          }
         }
         case "run:start" -> {
           String runId = StreamEvents.runIdOf(event);
@@ -108,7 +115,8 @@ public final class ReconnectingEvents implements StreamEvents {
           if (runId != null && !seenTerminal.add(runId)) {
             continue;
           }
-          terminal = true;
+          Map<String, Object> run = StreamEvents.runOf(event);
+          terminal = run != null && eventId != null && eventId.equals(run.get("event_id"));
         }
         default -> {}
       }
@@ -139,6 +147,11 @@ public final class ReconnectingEvents implements StreamEvents {
     if (streamId == null) {
       done = true;
       throw new HotStreamException("stream ended before event:published was received");
+    }
+    if (attempts >= options.maxAttempts()) {
+      done = true;
+      throw new HotStreamException(
+          "stream ended before the published event's run completed");
     }
     backoff();
   }

@@ -42,6 +42,7 @@ public final class HotClient {
   private final EnvResource env;
   private final OrgResource org;
   private final StreamsResource streams;
+  private final TasksResource tasks;
   private final FilesResource files;
   private final ProjectsResource projects;
   private final BuildsResource builds;
@@ -57,6 +58,7 @@ public final class HotClient {
     this.env = new EnvResource(transport);
     this.org = new OrgResource(transport);
     this.streams = new StreamsResource(transport);
+    this.tasks = new TasksResource(transport);
     this.files = new FilesResource(transport);
     this.projects = new ProjectsResource(transport);
     this.builds = new BuildsResource(transport);
@@ -94,6 +96,10 @@ public final class HotClient {
 
   public StreamsResource streams() {
     return streams;
+  }
+
+  public TasksResource tasks() {
+    return tasks;
   }
 
   public FilesResource files() {

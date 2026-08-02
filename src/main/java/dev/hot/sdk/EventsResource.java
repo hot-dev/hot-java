@@ -30,16 +30,11 @@ public final class EventsResource {
    * unwrapping a {@code {"$ok": ...}} result value.
    */
   public Object callHot(String fn, List<Object> args, CallOptions options) {
-    Map<String, Object> published =
-        publish(
-            Map.of(
-                "event_type", "hot:call",
-                "event_data", Map.of("fn", fn, "args", args == null ? List.of() : args)));
     Map<String, Object> run =
-        RunWaiter.waitForRunResult(
+        RunWaiter.waitForCallResult(
             transport,
-            (String) published.get("stream_id"),
-            (String) published.get("event_id"),
+            fn,
+            args == null ? List.of() : args,
             options.timeout(),
             options.onChunk());
     return RunWaiter.extractRunResult(run.get("result"));

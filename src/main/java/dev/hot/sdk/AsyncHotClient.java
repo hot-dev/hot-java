@@ -23,6 +23,7 @@ public final class AsyncHotClient {
   private final Env env;
   private final Org org;
   private final Streams streams;
+  private final Tasks tasks;
   private final Files files;
   private final Projects projects;
   private final Builds builds;
@@ -39,6 +40,7 @@ public final class AsyncHotClient {
     this.env = new Env();
     this.org = new Org();
     this.streams = new Streams();
+    this.tasks = new Tasks();
     this.files = new Files();
     this.projects = new Projects();
     this.builds = new Builds();
@@ -97,6 +99,10 @@ public final class AsyncHotClient {
 
   public Streams streams() {
     return streams;
+  }
+
+  public Tasks tasks() {
+    return tasks;
   }
 
   public Files files() {
@@ -173,6 +179,22 @@ public final class AsyncHotClient {
     public CompletableFuture<Map<String, Object>> get(String runId) {
       return supply(() -> client.runs().get(runId));
     }
+
+    public CompletableFuture<Map<String, Object>> waitFor(String runId) {
+      return supply(() -> client.runs().waitFor(runId));
+    }
+
+    public CompletableFuture<Map<String, Object>> waitFor(
+        String runId, RunWaitOptions options) {
+      return supply(() -> client.runs().waitFor(runId, options));
+    }
+
+    /** Streams durable run snapshots to {@code onEvent} until the run is terminal. */
+    public CompletableFuture<Void> subscribe(
+        String runId, Consumer<Map<String, Object>> onEvent) {
+      return supply(() -> client.runs().subscribe(runId))
+          .thenCompose(source -> drain(source, onEvent));
+    }
   }
 
   /** Async view of {@link EnvResource}. */
@@ -217,6 +239,28 @@ public final class AsyncHotClient {
         SubscribeWithEventOptions options,
         Consumer<Map<String, Object>> onEvent) {
       return supply(() -> client.streams().subscribeWithEvent(body, options))
+          .thenCompose(source -> drain(source, onEvent));
+    }
+  }
+
+  /** Async view of {@link TasksResource}. */
+  public final class Tasks {
+    public CompletableFuture<Map<String, Object>> get(String taskId) {
+      return supply(() -> client.tasks().get(taskId));
+    }
+
+    public CompletableFuture<Map<String, Object>> waitFor(String taskId) {
+      return supply(() -> client.tasks().waitFor(taskId));
+    }
+
+    public CompletableFuture<Map<String, Object>> waitFor(
+        String taskId, TaskWaitOptions options) {
+      return supply(() -> client.tasks().waitFor(taskId, options));
+    }
+
+    public CompletableFuture<Void> subscribe(
+        String taskId, Consumer<Map<String, Object>> onEvent) {
+      return supply(() -> client.tasks().subscribe(taskId))
           .thenCompose(source -> drain(source, onEvent));
     }
   }

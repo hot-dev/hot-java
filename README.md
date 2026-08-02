@@ -64,6 +64,15 @@ clients should call your own backend route instead of exposing a Hot API key.
 Most management endpoints require an API key. Sessions and service keys are
 permission-scoped and are mainly for event publishing and stream reads.
 
+When code has a run id but does not need the full stream, wait on its durable
+terminal snapshot:
+
+```java
+Map<String, Object> run = client.runs().waitFor(
+    runId,
+    new RunWaitOptions().timeout(Duration.ofMinutes(5)));
+```
+
 ## Async Usage
 
 `AsyncHotClient` wraps a `HotClient` and returns `CompletableFuture`s, running
@@ -78,6 +87,20 @@ async.events()
     .publish(Map.of("event_type", "team-agent:ask", "event_data", Map.of("question", "what changed?")))
     .thenAccept(event -> System.out.println(event.get("stream_id")));
 ```
+
+When a run returns a background task id, wait through the durable task resource:
+
+```java
+Map<String, Object> task = client.tasks().waitFor(
+    taskId,
+    new TaskWaitOptions().timeout(Duration.ofMinutes(5)));
+```
+
+The task waiter receives the latest persisted state first and reconnects, so it
+cannot miss a task that completed before subscription. A failed, cancelled, or
+timed-out task throws `HotTaskException` with the final task record.
+The task's parent stream also emits durable `task:update` events, which is
+useful when one subscription needs to coordinate several tasks.
 
 ## Errors
 
@@ -95,8 +118,8 @@ try {
 ```
 
 Transport failures throw `HotTransportException`; run failures from
-`waitForRunResult`/`callHot` throw `HotRunException`; wait timeouts throw
-`HotTimeoutException`. All are unchecked.
+`runs().waitFor`/`waitForRunResult`/`callHot` throw `HotRunException`; task failures throw
+`HotTaskException`; wait timeouts throw `HotTimeoutException`. All are unchecked.
 
 ### Retries
 
@@ -109,8 +132,9 @@ requests are never retried.
 `HotClient` mirrors the Hot API v1 resources:
 
 - `client.events()` — publish, list, get, inspect event runs, and call Hot functions with `callHot(fn, args, options)`
-- `client.streams()` — subscribe to run streams, wait for run results, and publish events atomically (reconnects automatically across the 5-minute SSE timeout; use `.reconnect(false)` to opt out)
-- `client.runs()` — list, inspect, and view run stats
+- `client.streams()` — subscribe to run and task updates, wait for run results, and publish events atomically (reconnects automatically across the 5-minute SSE timeout; use `.reconnect(false)` to opt out)
+- `client.runs()` — list, inspect, subscribe to, and wait for durable runs
+- `client.tasks()` — get, subscribe to, and wait for durable background tasks
 - `client.files()` — upload, download, list, and delete files (including multipart uploads)
 - `client.projects()` — create, list, update, activate, deactivate, and delete projects
 - `client.builds()` — upload, download, deploy, and look up live/deployed builds
@@ -127,9 +151,8 @@ API endpoints that do not yet have a resource helper.
 `client.env().subscribe()` requires API key credentials and a live API pub/sub
 backend; local API servers without pub/sub return a 503.
 `subscribeWithEvent` reconnects across the API's 5-minute SSE timeout and
-stops after the first terminal `run:*` event it sees, so use
-`client.streams().subscribe` directly if your app expects multiple independent
-runs on the same stream.
+stops after the terminal run correlated to the event it published. Unrelated
+runs on the same stream do not end the iterator.
 
 ## Customizing the HTTP Client
 
