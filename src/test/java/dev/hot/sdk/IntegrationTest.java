@@ -72,6 +72,65 @@ class IntegrationTest {
   }
 
   @Test
+  void waitForTaskStartedByEventHandler() {
+    HotClient client = client();
+    String taskId = null;
+    String handlerRunId = null;
+    String streamId = null;
+    try (StreamEvents events =
+        client
+            .streams()
+            .subscribeWithEvent(
+                Map.of("event_type", "sdk:task", "event_data", Map.of("value", "hello")))) {
+      while (events.hasNext()) {
+        Map<String, Object> event = events.next();
+        switch (StreamEvents.typeOf(event)) {
+          case "event:published" -> streamId = (String) event.get("stream_id");
+          case "run:fail", "run:cancel" -> fail("run did not complete: " + event);
+          case "run:stop" -> {
+            Map<String, Object> run = StreamEvents.runOf(event);
+            handlerRunId = (String) run.get("run_id");
+            Map<String, Object> result = castMap(run.get("result"));
+            Map<String, Object> work = castMap(result.get("work"));
+            taskId = (String) work.get("task");
+          }
+          default -> {}
+        }
+        if (taskId != null) {
+          break;
+        }
+      }
+    }
+
+    assertNotNull(taskId, "run result did not contain work.task");
+    assertNotNull(handlerRunId, "run:stop did not contain run_id");
+    assertNotNull(streamId, "event:published did not contain stream_id");
+
+    Map<String, Object> handlerRun = client.runs().waitFor(handlerRunId);
+    assertEquals("succeeded", handlerRun.get("status"));
+
+    Map<String, Object> streamedTask = null;
+    try (StreamEvents events = client.streams().subscribe(streamId)) {
+      while (events.hasNext()) {
+        Map<String, Object> event = events.next();
+        if (!"task:update".equals(StreamEvents.typeOf(event))) {
+          continue;
+        }
+        Map<String, Object> task = castMap(event.get("task"));
+        if (taskId.equals(task.get("task_id")) && "completed".equals(task.get("status"))) {
+          streamedTask = task;
+          break;
+        }
+      }
+    }
+    assertNotNull(streamedTask, "stream subscription did not receive completed task:update");
+
+    Map<String, Object> task = client.tasks().waitFor(taskId);
+    assertEquals("completed", task.get("status"));
+    assertEquals(Map.of("processed", "hello"), task.get("result"));
+  }
+
+  @Test
   void callHotAddNums() {
     Object result = client().events().callHot("::fixture::sdk/add-nums", List.of(2, 3));
     assertEquals(5, result);
