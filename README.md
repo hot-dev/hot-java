@@ -12,7 +12,7 @@ Official Java SDK for the [Hot Dev](https://hot.dev) API.
 Gradle:
 
 ```kotlin
-implementation("dev.hot:hot-sdk:1.1.3")
+implementation("dev.hot:hot-sdk:1.2.0")
 ```
 
 Maven:
@@ -21,7 +21,7 @@ Maven:
 <dependency>
   <groupId>dev.hot</groupId>
   <artifactId>hot-sdk</artifactId>
-  <version>1.1.3</version>
+  <version>1.2.0</version>
 </dependency>
 ```
 
