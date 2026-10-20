@@ -28,7 +28,7 @@ jobs:
           java-version: "21"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
 
       - name: Build and test
         run: ./gradlew build -PjavaToolchainVersion=${{ matrix.java }}
@@ -47,10 +47,10 @@ jobs:
           java-version: "21"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
 
       - name: Install hot
-        uses: hot-dev/setup-hot@v1
+        uses: hot-dev/setup-hot@92cf9e03f49293fb31f28a56ed2c85a3424d90ad # v1
 
       - name: Run integration tests
         run: ./integration/run.sh
