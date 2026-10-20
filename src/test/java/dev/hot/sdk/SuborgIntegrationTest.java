@@ -4,8 +4,6 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,7 +19,7 @@ class SuborgIntegrationTest {
   private Map<String, Object> fixture() throws Exception {
     return new ObjectMapper()
         .readValue(
-            Files.readString(Path.of(System.getenv("HOT_TEST_SUBORG_FIXTURE"))),
+            System.getenv("HOT_TEST_SUBORG_FIXTURE"),
             new TypeReference<>() {});
   }
 
