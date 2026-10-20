@@ -46,9 +46,15 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // A new disposable server must always execute the live tests, even if
+    // Gradle's compiled test inputs are unchanged. Do not fingerprint tokens.
+    outputs.upToDateWhen {
+        !providers.environmentVariable("HOT_TEST_API_KEY").isPresent &&
+            !providers.environmentVariable("HOT_TEST_SUBORG_FIXTURE").isPresent
+    }
     // Forward the integration-test variables from the *client* environment.
     // The forked test JVM otherwise inherits the daemon's stale environment.
-    for (key in listOf("HOT_TEST_API_KEY", "HOT_TEST_BASE_URL")) {
+    for (key in listOf("HOT_TEST_API_KEY", "HOT_TEST_BASE_URL", "HOT_TEST_SUBORG_FIXTURE")) {
         val value = providers.environmentVariable(key)
         if (value.isPresent) {
             environment(key, value.get())

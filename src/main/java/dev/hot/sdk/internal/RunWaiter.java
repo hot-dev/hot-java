@@ -1,5 +1,6 @@
 package dev.hot.sdk.internal;
 
+import dev.hot.sdk.HotApiException;
 import dev.hot.sdk.HotRunException;
 import dev.hot.sdk.HotStreamException;
 import dev.hot.sdk.HotTaskException;
@@ -49,6 +50,9 @@ public final class RunWaiter {
       } catch (HotRunException error) {
         throw error;
       } catch (RuntimeException error) {
+        if (error instanceof HotApiException apiError && apiError.isAuthorizationFailure()) {
+          throw error;
+        }
         if (expired(deadline)) {
           throw new HotTimeoutException("Timeout waiting for run result");
         }
@@ -75,9 +79,7 @@ public final class RunWaiter {
     long deadline = System.nanoTime() + timeout.toNanos();
     RunState state = new RunState(null);
     Map<String, Object> body =
-        Map.of(
-            "event_type", "hot:call",
-            "event_data", Map.of("fn", fn, "args", args));
+        Map.of("event_type", "hot:call", "event_data", Map.of("fn", fn, "args", args));
     for (int attempt = 0; attempt <= 5; attempt++) {
       String method = state.streamId == null ? "POST" : "GET";
       String path =
@@ -93,6 +95,9 @@ public final class RunWaiter {
       } catch (HotRunException error) {
         throw error;
       } catch (RuntimeException error) {
+        if (error instanceof HotApiException apiError && apiError.isAuthorizationFailure()) {
+          throw error;
+        }
         if (expired(deadline)) {
           throw new HotTimeoutException("Timeout waiting for run result");
         }
@@ -118,8 +123,7 @@ public final class RunWaiter {
     long deadline = System.nanoTime() + timeout.toNanos();
     for (int attempt = 0; attempt <= maxAttempts; attempt++) {
       try (StreamEvents events =
-          transport.stream(
-              "GET", "/tasks/" + Transport.enc(taskId) + "/subscribe", null, null)) {
+          transport.stream("GET", "/tasks/" + Transport.enc(taskId) + "/subscribe", null, null)) {
         ScheduledFuture<?> closer = scheduleClose(events, deadline);
         try {
           while (events.hasNext()) {
@@ -142,8 +146,7 @@ public final class RunWaiter {
                 || "cancelled".equals(status)
                 || "timed_out".equals(status)) {
               String message = resultMessage(task.get("result"));
-              throw new HotTaskException(
-                  message != null ? message : "Task " + status, task);
+              throw new HotTaskException(message != null ? message : "Task " + status, task);
             }
           }
         } finally {
@@ -152,6 +155,9 @@ public final class RunWaiter {
       } catch (HotTaskException error) {
         throw error;
       } catch (RuntimeException error) {
+        if (error instanceof HotApiException apiError && apiError.isAuthorizationFailure()) {
+          throw error;
+        }
         if (expired(deadline)) {
           throw new HotTimeoutException("Timeout waiting for task");
         }
@@ -174,8 +180,7 @@ public final class RunWaiter {
     long deadline = System.nanoTime() + timeout.toNanos();
     for (int attempt = 0; attempt <= maxAttempts; attempt++) {
       try (StreamEvents events =
-          transport.stream(
-              "GET", "/runs/" + Transport.enc(runId) + "/subscribe", null, null)) {
+          transport.stream("GET", "/runs/" + Transport.enc(runId) + "/subscribe", null, null)) {
         ScheduledFuture<?> closer = scheduleClose(events, deadline);
         try {
           while (events.hasNext()) {
@@ -204,6 +209,9 @@ public final class RunWaiter {
       } catch (HotRunException error) {
         throw error;
       } catch (RuntimeException error) {
+        if (error instanceof HotApiException apiError && apiError.isAuthorizationFailure()) {
+          throw error;
+        }
         if (expired(deadline)) {
           throw new HotTimeoutException("Timeout waiting for run");
         }

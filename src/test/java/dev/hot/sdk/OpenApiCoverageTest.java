@@ -26,6 +26,15 @@ class OpenApiCoverageTest {
 
   private static Map<String, String> buildCoverage() {
     Map<String, String> coverage = new LinkedHashMap<>();
+    coverage.put("GET /v1/management/children", "management.listChildren");
+    coverage.put("POST /v1/management/children", "management.createChild");
+    coverage.put("PATCH /v1/management/children/{child_id}/state", "management.setChildState");
+    coverage.put(
+        "POST /v1/management/children/{child_id}/environments", "management.createEnvironment");
+    coverage.put(
+        "POST /v1/management/children/{child_id}/environments/{env_id}/api-keys",
+        "management.createApiKey");
+    coverage.put("GET /v1/management/usage", "management.usage");
     coverage.put("GET /status", ""); // public health endpoint
     coverage.put("GET /v1/projects", "projects.list");
     coverage.put("POST /v1/projects", "projects.create");
@@ -34,8 +43,7 @@ class OpenApiCoverageTest {
     coverage.put("DELETE /v1/projects/{project_id_or_slug}", "projects.delete");
     coverage.put("POST /v1/projects/{project_id_or_slug}/activate", "projects.activate");
     coverage.put("POST /v1/projects/{project_id_or_slug}/deactivate", "projects.deactivate");
-    coverage.put(
-        "GET /v1/projects/{project_id_or_slug}/event-handlers", "projects.eventHandlers");
+    coverage.put("GET /v1/projects/{project_id_or_slug}/event-handlers", "projects.eventHandlers");
     coverage.put("GET /v1/projects/{project_id_or_slug}/schedules", "projects.schedules");
     coverage.put("GET /v1/builds", "builds.list");
     coverage.put("GET /v1/projects/{project_id_or_slug}/builds", "builds.listForProject");
@@ -97,8 +105,7 @@ class OpenApiCoverageTest {
   @Test
   void openApiOperationsHaveSdkCoverageOrExplicitIgnore() throws Exception {
     Set<String> operations;
-    try (InputStream fixture =
-        getClass().getResourceAsStream("/openapi-operations.json")) {
+    try (InputStream fixture = getClass().getResourceAsStream("/openapi-operations.json")) {
       List<Map<String, String>> parsed =
           new ObjectMapper().readValue(fixture, new TypeReference<>() {});
       operations =
@@ -119,8 +126,13 @@ class OpenApiCoverageTest {
         continue;
       }
       String[] parts = entry.getValue().split("\\.", 2);
-      Method accessor = HotClient.class.getMethod(parts[0]);
-      Object resource = accessor.invoke(client);
+      Object resource;
+      if (parts[0].equals("management")) {
+        resource = HotManagementClient.builder("hm_test").build();
+      } else {
+        Method accessor = HotClient.class.getMethod(parts[0]);
+        resource = accessor.invoke(client);
+      }
       boolean exists =
           Arrays.stream(resource.getClass().getMethods())
               .anyMatch(method -> method.getName().equals(parts[1]));

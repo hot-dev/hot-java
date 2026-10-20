@@ -15,7 +15,11 @@ public final class HotApiException extends RuntimeException {
   private final Map<String, Object> errorBody;
 
   public HotApiException(
-      int statusCode, String message, String code, String requestId, Integer retryAfter,
+      int statusCode,
+      String message,
+      String code,
+      String requestId,
+      Integer retryAfter,
       Map<String, Object> errorBody) {
     super(message);
     this.statusCode = statusCode;
@@ -23,6 +27,10 @@ public final class HotApiException extends RuntimeException {
     this.requestId = requestId;
     this.retryAfter = retryAfter;
     this.errorBody = errorBody;
+  }
+
+  public boolean isAuthorizationFailure() {
+    return statusCode == 401 || statusCode == 403;
   }
 
   public int statusCode() {

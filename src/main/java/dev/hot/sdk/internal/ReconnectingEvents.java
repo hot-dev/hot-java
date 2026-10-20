@@ -1,5 +1,6 @@
 package dev.hot.sdk.internal;
 
+import dev.hot.sdk.HotApiException;
 import dev.hot.sdk.HotStreamException;
 import dev.hot.sdk.HotTransportException;
 import dev.hot.sdk.StreamEvents;
@@ -11,9 +12,9 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 
 /**
- * subscribeWithEvent's reconnect loop: resubscribes to the same stream_id across the API's
- * 5-minute SSE timeout until a terminal run event arrives, deduping replayed run:start and
- * terminal events by run_id. Not part of the public API.
+ * subscribeWithEvent's reconnect loop: resubscribes to the same stream_id across the API's 5-minute
+ * SSE timeout until a terminal run event arrives, deduping replayed run:start and terminal events
+ * by run_id. Not part of the public API.
  */
 public final class ReconnectingEvents implements StreamEvents {
 
@@ -74,18 +75,21 @@ public final class ReconnectingEvents implements StreamEvents {
 
   private void advance() {
     while (!done) {
-      if (source == null) {
-        source = open();
-      }
-
       Map<String, Object> event;
       try {
+        if (source == null) {
+          source = open();
+        }
         if (!source.hasNext()) {
           onConnectionEnd();
           continue;
         }
         event = source.next();
       } catch (RuntimeException error) {
+        if (error instanceof HotApiException apiError && apiError.isAuthorizationFailure()) {
+          close();
+          throw error;
+        }
         if (streamId == null || attempts >= options.maxAttempts()) {
           done = true;
           throw error;
@@ -150,8 +154,7 @@ public final class ReconnectingEvents implements StreamEvents {
     }
     if (attempts >= options.maxAttempts()) {
       done = true;
-      throw new HotStreamException(
-          "stream ended before the published event's run completed");
+      throw new HotStreamException("stream ended before the published event's run completed");
     }
     backoff();
   }
