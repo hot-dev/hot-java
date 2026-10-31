@@ -75,9 +75,12 @@ Map<String, Object> run = client.runs().waitFor(
 
 ## Async Usage
 
-`AsyncHotClient` wraps a `HotClient` and returns `CompletableFuture`s, running
-calls on the common pool or an executor you supply; streaming methods deliver
-events to a consumer:
+`AsyncHotClient` wraps a `HotClient` and returns `CompletableFuture`s. Calls
+block a thread while they wait, so they run on a dedicated pool of daemon
+threads (`hot-sdk-async-N`) by default, not the common pool; pass your own with
+`AsyncHotClient.wrap(client, executor)`. Streaming methods deliver events to a
+consumer, and cancelling their future (`future.cancel(true)`) closes the
+subscription:
 
 ```java
 import dev.hot.sdk.AsyncHotClient;
@@ -117,15 +120,49 @@ try {
 }
 ```
 
+A `403 key_scope_mismatch` throws the subclass `HotKeyScopeException`: the call
+needs the other kind of API key. `requiredScope()` is `"org"` for `orgs()` and
+`apiKeys()` and `"env"` for every runtime resource (see [Org API](#org-api)).
+
 Transport failures throw `HotTransportException`; run failures from
 `runs().waitFor`/`waitForRunResult`/`callHot` throw `HotRunException`; task failures throw
 `HotTaskException`; wait timeouts throw `HotTimeoutException`. All are unchecked.
 
-### Retries
+### Retries and reconnects
 
 JSON requests are retried automatically (at most twice) when the API responds
-429 with a `retry_after`; other errors are thrown as-is. Streaming and raw
-requests are never retried.
+429 with a `retry_after`, and GET, PUT and DELETE requests also on 502, 503 and
+504; other errors are thrown as-is. Raw requests are never retried.
+
+Durable waiters (`runs().waitFor`, `tasks().waitFor`, `waitForRunResult`,
+`callHot`) and `subscribeWithEvent` reconnect across transport errors, 408, 429
+and 5xx, with jittered exponential backoff (0.5 s doubling to 10 s) that honours
+`Retry-After`. They stop at once on permanent errors: any other 4xx, including
+401, 403 and 404. `maxAttempts` (default 5) counts consecutive failed
+connections only: the API ends every subscription after 5 minutes with
+`stream:complete`, and those rollovers reconnect immediately without using the
+budget, so a long run is bounded only by its timeout.
+
+A waiter's timeout is an absolute deadline covering the connection, the wait
+for response headers, the stream and any backoff. Connections that receive
+nothing for 45 seconds (the API sends a keepalive every 15 s) are treated as
+dead and reconnected.
+
+A handler with `retry` options reports a failed attempt as `run:fail` with
+status `pending_retry`. Waiters and `subscribeWithEvent` keep going and return
+the retry run, which the API links to the first attempt by `origin_run_id`.
+
+### Decimal values
+
+JSON numbers with a fraction decode as `Double` by default, which rounds values
+beyond about 16 significant digits (Hot `Dec` results, money in `event_data`).
+Build the client with `useBigDecimalForFloats(true)` to decode them as
+`BigDecimal` in every response, stream event and run result:
+
+```java
+HotClient client = HotClient.builder(token).useBigDecimalForFloats(true).build();
+BigDecimal total = (BigDecimal) client.events().callHot("::billing/total", List.of(orderId));
+```
 
 ## Resources
 
@@ -143,16 +180,91 @@ requests are never retried.
 - `client.sessions()` — create and revoke scoped sessions
 - `client.serviceKeys()` — create and revoke scoped service keys
 - `client.org()` — view usage and limits
-- `client.env()` — read environment info and subscribe to environment events
+- `client.env()` — read environment info, subscribe to environment events, and purge call traces
+- `client.orgs()` — org API: child organizations, environments, and org and environment API keys (org API keys only)
+- `client.apiKeys()` — read, narrow, rotate, and revoke API keys by id (org API keys only)
 
 Use `client.request(...)` or `client.requestRaw(...)` as an escape hatch for
 API endpoints that do not yet have a resource helper.
 
 `client.env().subscribe()` requires API key credentials and a live API pub/sub
 backend; local API servers without pub/sub return a 503.
-`subscribeWithEvent` reconnects across the API's 5-minute SSE timeout and
-stops after the terminal run correlated to the event it published. Unrelated
+`subscribeWithEvent` reconnects across the API's 5-minute SSE rollover and
+stops after the final run correlated to the event it published. Unrelated
 runs on the same stream do not end the iterator.
+
+`onChunk` callbacks receive the run's `stream:data` text in order, even when
+the API delivers chunks before `run:start` (hot 3.0.x does for short runs).
+
+## Org API
+
+An **org API key** manages a root organization's children: it creates child
+organizations and environments, mints environment API keys for them, deploys
+projects into them, and reads account usage. Root administrators create org
+keys in the Hot App. An org key calls only `client.orgs()` and
+`client.apiKeys()`; every runtime resource (events, streams, runs, projects,
+...) needs an **environment API key**, session, or service key. Calling the
+other scope's routes throws `HotKeyScopeException`. Use one client per
+credential:
+
+```java
+HotClient admin = HotClient.builder(System.getenv("HOT_ORG_API_KEY")).build();
+
+Map<String, Object> child = admin.orgs().create(Map.of(
+    "name", "Customer", "slug", "customer-123",          // slug: at most 32 characters
+    "idempotency_key", "customer-123"));                  // reuse it when retrying
+String orgId = (String) ((Map<?, ?>) child.get("org")).get("org_id");
+String envId = (String) child.get("env_id");             // the child's default environment
+
+Map<String, Object> key = admin.orgs().createEnvApiKey(orgId, envId, Map.of(
+    "description", "Customer backend",
+    "permissions", Map.of("event:*", List.of("create", "read"), "stream:*", List.of("read"))));
+HotClient customer = HotClient.builder((String) key.get("token")).build();
+customer.events().publish(Map.of("event_type", "order:placed", "event_data", Map.of()));
+```
+
+| Method | Route |
+| --- | --- |
+| `orgs().list(query)` / `create(body)` / `get(orgId)` | `/v1/orgs`, `/v1/orgs/{org_id}` |
+| `orgs().update(orgId, Map.of("state", "suspended"))` | `active`, `suspended` or `archived`; returns the org |
+| `orgs().usage(rootOrgId)` | Account usage; pass the root org id |
+| `orgs().listEnvs(orgId)` / `createEnv(orgId, body)` / `getEnv(orgId, envId)` | Environments (creation is idempotent by name) |
+| `orgs().listApiKeys(orgId)` / `createApiKey(orgId, body)` | Org API keys in the key's own org |
+| `orgs().listEnvApiKeys(orgId, envId)` / `createEnvApiKey(orgId, envId, body)` | Environment API keys |
+| `orgs().env(orgId, envId).projects()` / `.builds()` / `.context()` | Projects, builds, deploys and context in a child environment |
+| `orgs().purgeCalls(orgId, includeSubOrgs)` | Delete call traces |
+| `apiKeys().get(id)` / `update(id, body)` / `rotate(id, body)` / `revoke(id)` | Any key the org key issued |
+
+Minted keys' grants must fit inside the org key's grants. Revoking or narrowing
+an org key restricts every key, service key and session issued under it on
+their next request. `AsyncHotClient` has the same methods under `orgs()` and
+`apiKeys()`. See the server's [org API docs](https://hot.dev/docs/api/management)
+for the permission grammar.
+
+### Org API integration tests
+
+See [the validation record](integration/VALIDATION.md) for the tested server revision.
+
+`integration/suborg_fixture.py` creates a disposable database and loopback API
+server built from the hot revision in `integration/hot-server.ref`, seeds an org
+API key, runs the SDK tests, and removes only its own resources. The canonical
+fixture lives in hot-python and is synchronized across all five SDKs. For
+PostgreSQL it also needs Docker, `psql` and a hot checkout (default: sibling
+`hot`); the API then runs as a non-owner `NOSUPERUSER NOBYPASSRLS` login with
+RLS enforced.
+
+```bash
+python3 integration/suborg_fixture.py --hot ../hot/target/debug/hot --backend postgres -- \
+  ./gradlew test --tests dev.hot.sdk.SuborgIntegrationTest
+# For SQLite, use --backend sqlite.
+```
+
+Coverage includes child and environment provisioning and idempotency,
+identical project names in siblings, foreign-ID and stream denial, key-scope
+errors in both directions, org-scoped projects and context, key rotation and
+revocation, restricted environment-key grants, service and session issuance
+and revocation, revocation and narrowing of an issuing org key, and child
+suspension and resumption.
 
 ## Customizing the HTTP Client
 
@@ -164,8 +276,10 @@ HotClient client = HotClient.builder(token)
     .build();
 ```
 
-Use the builder's `timeout` for JSON requests. Do not configure a client-wide
-request timeout for SSE subscriptions — it would sever long-lived streams.
+The default `HttpClient` has a 10-second connect timeout. Use the builder's
+`timeout` (default 60 seconds) for JSON requests. Do not configure a
+client-wide request timeout for SSE subscriptions — it would sever long-lived
+streams.
 
 ## Casing Policy
 
@@ -192,89 +306,3 @@ The SDK never transforms user-owned payloads such as `event_data`.
 ## License
 
 Apache-2.0
-
-## Sub-organization management
-
-Requires a Hot server release containing the sub-org management API. Use the
-separate `HotManagementClient` with an `hm_` credential issued by a root admin.
-Runtime API keys, service keys, and sessions cannot call management endpoints;
-management credentials cannot call runtime endpoints. Create a runtime client
-per environment credential. A root environment key cannot access its children,
-and a child key cannot access siblings. There is no tenant or org selector on
-runtime methods. Each child owns its environments and deployments.
-
-```java
-HotManagementClient management = HotManagementClient.builder(managementToken).build();
-Map<String, Object> child = management.createChild(Map.of(
-    "name", "Customer", "slug", "customer-unique-slug",
-    "idempotency_key", "customer-provisioning-123"));
-Map<?, ?> org = (Map<?, ?>) child.get("org");
-Map<String, Object> key = management.createApiKey(
-    (String) org.get("org_id"), (String) child.get("env_id"), Map.of(
-        "description", "Customer backend", "permissions", Map.of("*:*", List.of("*"))));
-HotClient customer = HotClient.builder((String) key.get("token")).build();
-System.out.println(customer.env().get());
-```
-
-`AsyncHotManagementClient.wrap(management)` offers the same methods as futures,
-with an optional executor, matching `AsyncHotClient`.
-
-| Management method | Purpose |
-| --- | --- |
-| `listChildren(query)` | List authorized children (returns `children` and `total`) |
-| `createChild(body)` | Provision a child and default environment |
-| `setChildState(childId, state)` | Set `active`, `suspended`, or `archived` (no response body) |
-| `createEnvironment(childId, body)` | Provision a child environment by name |
-| `createApiKey(childId, envId, body)` | Issue a child API key within the delegation ceiling |
-| `usage()` | Read account-wide usage |
-
-Child creation requires a stable `idempotency_key`; reuse it for retries of the
-same request. A different payload with that key is rejected. Environment
-creation is idempotent within a child by exact name. Listing accepts `limit`
-(maximum 500) and `offset`. Account usage requires `usage:read` and explicit
-`all_children` authority. Management credentials cannot issue other management
-credentials or grant human access. Service keys and sessions are issued with the
-child environment's runtime API key and inherit its management issuer chain.
-Issuer expiry, revocation, or permission narrowing restrict existing descendants;
-expansion never expands their stored grants.
-
-Administrative runtime operations require an API key **and** the appropriate
-resource/action grants. For example, project listing requires `project:*` with
-`read`, and environment info and usage require `env:{env_id}` with `read`.
-Event-only keys receive `403` for these operations; API-key status alone does
-not grant administration. Full-access `{"*:*": ["*"]}` keys retain access.
-See the server's [permission contract](https://hot.dev/docs/api/management).
-
-`org.usage` reports only the credential's **environment consumption**, with
-`env_id`, `usage_scope: "environment"`, and `limits_scope: "billing_account"`.
-Its limits and plan come from the billing root; percentages compare this one
-environment against shared limits and do not describe remaining account quota.
-`usage.team_members` is zero because seats belong to the account. Use management
-`usage` for the account aggregate. Existing runtime endpoints and request bodies
-keep their shapes. JSON requests retain bounded 429/Retry-After handling;
-streaming reconnects and waiters stop on permanent `401`/`403` authorization errors.
-
-### Sub-org integration tests
-
-See [the validation record](integration/VALIDATION.md) for the tested server revision and results.
-
-The fixture creates an owned disposable database and loopback API server, runs
-the SDK tests, and removes only its own resources. The canonical fixture lives
-in hot-python and is synchronized across all five SDKs. No deployed credentials
-are used. Requires Python 3 and a Hot CLI built from the matching server branch.
-For PostgreSQL, also install Docker and `psql` and provide the public hot checkout
-(default: sibling `hot`). Migrations use a non-superuser schema owner; the API
-uses a distinct non-owner `NOSUPERUSER NOBYPASSRLS` login with RLS enforcement.
-The fixture's administrator seeds credentials only; SDK calls always use HTTP.
-
-```bash
-python3 integration/suborg_fixture.py --hot ../hot/target/debug/hot --backend postgres -- \
-  ./gradlew test --tests dev.hot.sdk.SuborgIntegrationTest
-# For SQLite, use --backend sqlite.
-```
-
-Coverage includes provisioning and environment idempotency, identical project
-names in siblings, foreign-ID and stream denial, parent runtime isolation,
-management/runtime token separation, usage scope, restricted API-key grants,
-service/session issuance and revocation, pre-existing descendant issuer
-revocation/narrowing, and child suspension/resumption.
