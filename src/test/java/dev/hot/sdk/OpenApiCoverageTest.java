@@ -40,8 +40,10 @@ class OpenApiCoverageTest {
     coverage.put("POST /v1/orgs/{org_id}/api-keys", "orgs.createApiKey");
     coverage.put("GET /v1/orgs/{org_id}/envs/{env_id}/api-keys", "orgs.listEnvApiKeys");
     coverage.put("POST /v1/orgs/{org_id}/envs/{env_id}/api-keys", "orgs.createEnvApiKey");
-    // The other forwarded project, build and context routes are not in the OpenAPI spec.
+    // The spec documents only the env projects and builds list routes; the other forwarded
+    // project, build and context routes are not in it.
     coverage.put("GET /v1/orgs/{org_id}/envs/{env_id}/projects", "orgEnv.projects.list");
+    coverage.put("GET /v1/orgs/{org_id}/envs/{env_id}/builds", "orgEnv.builds.list");
     coverage.put("GET /v1/api-keys/{key_id}", "apiKeys.get");
     coverage.put("PATCH /v1/api-keys/{key_id}", "apiKeys.update");
     coverage.put("DELETE /v1/api-keys/{key_id}", "apiKeys.revoke");
@@ -113,6 +115,7 @@ class OpenApiCoverageTest {
     coverage.put("PUT /v1/files/uploads/{upload_id}/{part_number}", "files.uploadPart");
     coverage.put("POST /v1/files/uploads/{upload_id}/complete", "files.completeUpload");
     coverage.put("DELETE /v1/files/uploads/{upload_id}", "files.abortUpload");
+    coverage.put("GET /v1/blobs/{blob_ref_id}/download", "blobs.download");
     return coverage;
   }
 

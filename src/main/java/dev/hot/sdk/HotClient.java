@@ -49,6 +49,7 @@ public final class HotClient {
   private final StreamsResource streams;
   private final TasksResource tasks;
   private final FilesResource files;
+  private final BlobsResource blobs;
   private final ProjectsResource projects;
   private final BuildsResource builds;
   private final ContextResource context;
@@ -67,6 +68,7 @@ public final class HotClient {
     this.streams = new StreamsResource(transport);
     this.tasks = new TasksResource(transport);
     this.files = new FilesResource(transport);
+    this.blobs = new BlobsResource(transport);
     this.projects = new ProjectsResource(transport);
     this.builds = new BuildsResource(transport);
     this.context = new ContextResource(transport);
@@ -113,6 +115,11 @@ public final class HotClient {
 
   public FilesResource files() {
     return files;
+  }
+
+  /** Large payloads spilled to blob storage (environment API keys only). */
+  public BlobsResource blobs() {
+    return blobs;
   }
 
   public ProjectsResource projects() {
