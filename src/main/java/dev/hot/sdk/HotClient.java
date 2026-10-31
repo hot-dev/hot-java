@@ -33,6 +33,11 @@ import java.util.Map;
  *
  * <p>Authenticated clients should run server-side; browser or untrusted clients should call your
  * own backend instead of embedding a Hot API key.
+ *
+ * <p>Hot has two key scopes. Environment API keys (and the sessions and service keys they issue)
+ * call runtime resources such as {@link #events()}, {@link #streams()} and {@link #projects()}.
+ * Org API keys call only {@link #orgs()} and {@link #apiKeys()}. Calling the other kind's routes
+ * throws {@link HotKeyScopeException}; use one client per credential.
  */
 public final class HotClient {
 
@@ -50,6 +55,8 @@ public final class HotClient {
   private final DomainsResource domains;
   private final SessionsResource sessions;
   private final ServiceKeysResource serviceKeys;
+  private final OrgsResource orgs;
+  private final ApiKeysResource apiKeys;
 
   HotClient(Transport transport) {
     this.transport = transport;
@@ -66,6 +73,8 @@ public final class HotClient {
     this.domains = new DomainsResource(transport);
     this.sessions = new SessionsResource(transport);
     this.serviceKeys = new ServiceKeysResource(transport);
+    this.orgs = new OrgsResource(transport);
+    this.apiKeys = new ApiKeysResource(transport);
   }
 
   /** Returns a builder using the given Hot API key, session token, or service key. */
@@ -130,6 +139,16 @@ public final class HotClient {
     return serviceKeys;
   }
 
+  /** Org API (org API keys only): child organizations, environments and API keys. */
+  public OrgsResource orgs() {
+    return orgs;
+  }
+
+  /** Org and environment API keys by id (org API keys only). */
+  public ApiKeysResource apiKeys() {
+    return apiKeys;
+  }
+
   /**
    * Calls a JSON API endpoint that does not yet have a resource helper. {@code path} is relative
    * to /v1 and the returned map is the response envelope.
@@ -163,6 +182,7 @@ public final class HotClient {
     private String baseUrl = Transport.DEFAULT_BASE_URL;
     private Duration timeout;
     private HttpClient httpClient;
+    private boolean bigDecimals;
 
     Builder(String token) {
       this.token = token;
@@ -177,22 +197,37 @@ public final class HotClient {
       return this;
     }
 
-    /** Bounds each JSON request. Not applied to streaming or raw requests. */
+    /**
+     * Bounds each JSON request (default 60 seconds). Not applied to streaming or raw requests;
+     * waiters take their own timeout.
+     */
     public Builder timeout(Duration timeout) {
       this.timeout = timeout;
       return this;
     }
 
     /**
-     * Overrides the underlying {@link HttpClient}, e.g. to configure proxies or executors.
+     * Overrides the underlying {@link HttpClient}, e.g. to configure proxies or executors. The
+     * default client has a 10-second connect timeout.
      */
     public Builder httpClient(HttpClient httpClient) {
       this.httpClient = httpClient;
       return this;
     }
 
+    /**
+     * Decodes JSON numbers with a fraction or exponent as {@link java.math.BigDecimal} instead of
+     * {@code Double} (default false), in responses, stream events and run results. Hot {@code
+     * Dec} values and user payloads such as {@code event_data} then keep every digit. Integers
+     * decode as {@code Integer}, {@code Long} or {@code BigInteger} either way.
+     */
+    public Builder useBigDecimalForFloats(boolean enabled) {
+      this.bigDecimals = enabled;
+      return this;
+    }
+
     public HotClient build() {
-      return new HotClient(new Transport(token, baseUrl, timeout, httpClient));
+      return new HotClient(new Transport(token, baseUrl, timeout, httpClient, bigDecimals));
     }
   }
 }

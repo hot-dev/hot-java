@@ -14,9 +14,16 @@ import java.util.Map;
 public final class BuildsResource {
 
   private final Transport transport;
+  private final String prefix;
 
   BuildsResource(Transport transport) {
+    this(transport, "");
+  }
+
+  /** {@code prefix} scopes every path, e.g. {@code /orgs/{org}/envs/{env}}. */
+  BuildsResource(Transport transport, String prefix) {
     this.transport = transport;
+    this.prefix = prefix;
   }
 
   /** Returns the build list envelope across all projects. */
@@ -26,7 +33,7 @@ public final class BuildsResource {
 
   /** Returns the build list envelope filtered by query parameters. */
   public Map<String, Object> list(Map<String, String> query) {
-    return transport.requestJson("GET", "/builds", null, query);
+    return transport.requestJson("GET", prefix + "/builds", null, query);
   }
 
   /** Returns the build list envelope for one project. */
@@ -37,7 +44,7 @@ public final class BuildsResource {
   /** Returns the build list envelope for one project, filtered by query parameters. */
   public Map<String, Object> listForProject(String project, Map<String, String> query) {
     return transport.requestJson(
-        "GET", "/projects/" + Transport.enc(project) + "/builds", null, query);
+        "GET", projectPath(project) + "/builds", null, query);
   }
 
   /** Returns a single build. */
@@ -45,7 +52,7 @@ public final class BuildsResource {
     return Json.dataObject(
         transport.requestJson(
             "GET",
-            "/projects/" + Transport.enc(project) + "/builds/" + Transport.enc(buildId),
+            projectPath(project) + "/builds/" + Transport.enc(buildId),
             null,
             null));
   }
@@ -54,14 +61,14 @@ public final class BuildsResource {
   public Map<String, Object> deployed(String project) {
     return Json.dataObject(
         transport.requestJson(
-            "GET", "/projects/" + Transport.enc(project) + "/builds/deployed", null, null));
+            "GET", projectPath(project) + "/builds/deployed", null, null));
   }
 
   /** Returns the project's live build. */
   public Map<String, Object> live(String project) {
     return Json.dataObject(
         transport.requestJson(
-            "GET", "/projects/" + Transport.enc(project) + "/builds/live", null, null));
+            "GET", projectPath(project) + "/builds/live", null, null));
   }
 
   /** Uploads a build archive as multipart form data. */
@@ -77,11 +84,11 @@ public final class BuildsResource {
     HttpResponse<InputStream> response =
         transport.requestRaw(
             "POST",
-            "/projects/" + Transport.enc(project) + "/builds",
+            projectPath(project) + "/builds",
             null,
             Map.of("Accept", "application/json", "Content-Type", encoded.contentType()),
             BodyPublishers.ofByteArray(encoded.body()));
-    return Responses.readData(response);
+    return Responses.readData(response, transport.bigDecimals());
   }
 
   /**
@@ -91,7 +98,7 @@ public final class BuildsResource {
   public HttpResponse<InputStream> download(String project, String buildId) {
     return transport.requestRaw(
         "GET",
-        "/projects/" + Transport.enc(project) + "/builds/" + Transport.enc(buildId) + "/download",
+        projectPath(project) + "/builds/" + Transport.enc(buildId) + "/download",
         null,
         null,
         BodyPublishers.noBody());
@@ -102,8 +109,12 @@ public final class BuildsResource {
     return Json.dataObject(
         transport.requestJson(
             "POST",
-            "/projects/" + Transport.enc(project) + "/builds/" + Transport.enc(buildId) + "/deploy",
+            projectPath(project) + "/builds/" + Transport.enc(buildId) + "/deploy",
             null,
             null));
+  }
+
+  private String projectPath(String project) {
+    return prefix + "/projects/" + Transport.enc(project);
   }
 }

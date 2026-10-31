@@ -14,9 +14,15 @@ public final class Responses {
 
   /** Reads a raw JSON response and returns its "data" object. */
   public static Map<String, Object> readData(HttpResponse<InputStream> response) {
+    return readData(response, false);
+  }
+
+  /** Reads a raw JSON response and returns its "data" object, optionally with BigDecimals. */
+  public static Map<String, Object> readData(
+      HttpResponse<InputStream> response, boolean bigDecimals) {
     try (InputStream stream = response.body()) {
       String body = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-      return Json.dataObject(Json.envelope(body));
+      return Json.dataObject(Json.envelope(body, bigDecimals));
     } catch (IOException error) {
       throw new HotTransportException(error);
     }

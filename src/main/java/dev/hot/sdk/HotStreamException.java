@@ -6,4 +6,8 @@ public class HotStreamException extends RuntimeException {
   public HotStreamException(String message) {
     super(message);
   }
+
+  public HotStreamException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

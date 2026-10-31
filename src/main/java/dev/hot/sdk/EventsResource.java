@@ -36,7 +36,8 @@ public final class EventsResource {
             fn,
             args == null ? List.of() : args,
             options.timeout(),
-            options.onChunk());
+            options.onChunk(),
+            options.maxAttempts());
     return RunWaiter.extractRunResult(run.get("result"));
   }
 

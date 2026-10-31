@@ -35,6 +35,12 @@ public final class RunsResource {
         transport.requestJson("GET", "/runs/" + Transport.enc(runId), null, null));
   }
 
+  /** Deletes a run's call traces. Returns {@code {calls_deleted, blob_refs_released, complete}}. */
+  public Map<String, Object> purgeCalls(String runId) {
+    return Json.dataObject(
+        transport.requestJson("DELETE", "/runs/" + Transport.enc(runId) + "/calls", null, null));
+  }
+
   /** Subscribes to durable snapshots of a single run. */
   public StreamEvents subscribe(String runId) {
     return transport.stream(

@@ -8,6 +8,7 @@ public final class CallOptions {
 
   private Duration timeout = Duration.ofSeconds(60);
   private Consumer<String> onChunk;
+  private int maxAttempts = 5;
 
   /** Bounds the wait for the run result (default 60 seconds). */
   public CallOptions timeout(Duration timeout) {
@@ -21,11 +22,25 @@ public final class CallOptions {
     return this;
   }
 
+  /**
+   * Caps consecutive failed reconnects (default 5). Connections that deliver events or end with
+   * the API's 5-minute stream:complete rollover do not count, so long runs are bounded only by
+   * the timeout.
+   */
+  public CallOptions maxAttempts(int maxAttempts) {
+    this.maxAttempts = maxAttempts;
+    return this;
+  }
+
   public Duration timeout() {
     return timeout;
   }
 
   public Consumer<String> onChunk() {
     return onChunk;
+  }
+
+  public int maxAttempts() {
+    return maxAttempts;
   }
 }

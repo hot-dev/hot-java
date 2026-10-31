@@ -11,7 +11,11 @@ This repo contains the Java SDK for the Hot Dev API.
   `stream_id`); the SDK never transforms user-owned payloads such as
   `event_data`. SDK-only options use Java-style names (`baseUrl`, `timeout`).
 - `HotClient` (sync) is canonical; `AsyncHotClient` is a thin
-  CompletableFuture wrapper over it on a configurable executor.
+  CompletableFuture wrapper over it on a configurable executor (default: a
+  dedicated daemon pool, never the common pool).
+- Two key scopes: org API keys call `orgs()` / `apiKeys()` only; environment
+  keys, sessions and service keys call everything else. `403
+  key_scope_mismatch` becomes `HotKeyScopeException` with `requiredScope()`.
 - Versioning follows the public API package version, in lockstep with
   `@hot-dev/sdk` (npm) and `hot-dev` (PyPI). Version lives in
   `gradle.properties` (`VERSION_NAME`).
@@ -28,16 +32,29 @@ This repo contains the Java SDK for the Hot Dev API.
 
 - `HotClient` / `AsyncHotClient` — builders, resource accessors, escape hatches
 - `internal/Transport` — auth, JSON envelope, raw, and SSE requests
-- `internal/SseEvents` / `internal/ReconnectingEvents` — SSE decode + the
-  subscribeWithEvent reconnect loop (dedupes replayed run events by run_id)
-- one class per resource (12, mirroring hot-python's resources.py)
+- `internal/SseEvents` / `internal/ReconnectingEvents` — SSE decode (with an
+  idle timeout) + the subscribeWithEvent reconnect loop (dedupes replayed run
+  events by run_id)
+- `internal/Backoff` — the reconnect policy every waiter shares: stop on
+  permanent 4xx, jittered backoff honouring Retry-After for transient errors,
+  a consecutive-failure budget that stream:complete rollovers reset
+- `internal/RunWaiter` / `internal/RunCorrelation` — durable waiters with an
+  absolute deadline; tie runs by event_id or origin_run_id (retries, with
+  orphans keyed by origin), buffer stream:data until the run ties, and hold a
+  failure whose raised retry_attempt announces a retry for a 5 s grace (the
+  API replays retried attempts lossily; same rule as hot-rust's `RunTracker`)
+- one class per resource (mirroring hot-python's resources.py), plus
+  `OrgsResource`, `OrgEnv` and `ApiKeysResource` for the org API
 - `OpenApiCoverageTest` — every OpenAPI operation must map to an SDK method or
   carry an explicit ignore; fixture in `src/test/resources/`.
 
 ## CI and Releases
 
-- CI runs on pushes and pull requests to `main`: `./gradlew build` on JDK 17
-  and 21 toolchains.
+- CI runs on pushes and pull requests to `main`: `./gradlew build javadoc` on
+  JDK 17, 21 and 25 toolchains, `integration/run.sh` against the released hot,
+  and the org API isolation job, which builds hot at `integration/hot-server.ref`
+  and runs `SuborgIntegrationTest` on restricted PostgreSQL. A weekly scheduled
+  run builds hot `main` instead, to catch API drift.
 - Maven Central releases run from tags named `v<version>` matching
   `gradle.properties` and go through the **Central Portal**
   (central.sonatype.com) via the `com.vanniktech.maven.publish` plugin
@@ -70,7 +87,8 @@ the matching `@hot-dev/sdk` JavaScript release when possible.
 `integration/run.sh` starts a scratch `hot dev` (requires the `hot` CLI and
 python3 on PATH) serving the Hot fixture project in `integration/fixture`
 (project `sdk-fixture`: an echo event handler, an always-failing handler and
-function, and hot:call targets). It binds 127.0.0.1 on HOT_TEST_PORT (default
+function, a handler that fails its first attempt and succeeds on retry
+(`sdk:flaky`), a function that streams three chunks, and hot:call targets). It binds 127.0.0.1 on HOT_TEST_PORT (default
 4723), mints a full-access API key directly in the fixture's sqlite database,
 exports HOT_TEST_BASE_URL / HOT_TEST_API_KEY, and runs `./gradlew test --tests dev.hot.sdk.IntegrationTest` (build.gradle.kts forwards the env vars to the forked test JVM past the Gradle daemon).
 The integration tests skip when HOT_TEST_API_KEY is unset, so regular test

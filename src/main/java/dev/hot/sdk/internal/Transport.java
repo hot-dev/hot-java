@@ -28,9 +28,16 @@ public final class Transport {
   public static final String USER_AGENT =
       "hot-sdk-java/" + versionOrDefault(Transport.class.getPackage().getImplementationVersion());
 
-  // JSON requests retry on 429 when the server supplies retry_after.
+  // JSON requests retry on 429 when the server supplies retry_after, and idempotent JSON
+  // requests also retry on 502/503/504.
   private static final int MAX_RETRIES = 2;
   private static final int MAX_RETRY_AFTER_SECONDS = 30;
+
+  /** Default bound for each JSON request when the builder sets no timeout. */
+  public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(60);
+
+  /** Connect timeout of the default HttpClient. */
+  public static final Duration DEFAULT_CONNECT_TIMEOUT = Duration.ofSeconds(10);
 
   private static String versionOrDefault(String version) {
     return version != null ? version : "dev";
@@ -41,8 +48,22 @@ public final class Transport {
   private final String apiBaseUrl;
   private final HttpClient httpClient;
   private final Duration timeout;
+  private final boolean bigDecimals;
 
   public Transport(String token, String baseUrl, Duration timeout, HttpClient httpClient) {
+    this(token, baseUrl, timeout, httpClient, false);
+  }
+
+  /**
+   * {@code timeout} bounds each JSON request ({@link #DEFAULT_TIMEOUT} when null). With
+   * {@code bigDecimals}, JSON floats decode as {@link java.math.BigDecimal}.
+   */
+  public Transport(
+      String token,
+      String baseUrl,
+      Duration timeout,
+      HttpClient httpClient,
+      boolean bigDecimals) {
     if (token == null || token.isEmpty()) {
       throw new IllegalArgumentException("token is required");
     }
@@ -53,12 +74,21 @@ public final class Transport {
     this.token = token;
     this.baseUrl = trimmed;
     this.apiBaseUrl = trimmed + "/v1";
-    this.httpClient = httpClient != null ? httpClient : HttpClient.newHttpClient();
-    this.timeout = timeout;
+    this.httpClient =
+        httpClient != null
+            ? httpClient
+            : HttpClient.newBuilder().connectTimeout(DEFAULT_CONNECT_TIMEOUT).build();
+    this.timeout = timeout != null ? timeout : DEFAULT_TIMEOUT;
+    this.bigDecimals = bigDecimals;
   }
 
   public String baseUrl() {
     return baseUrl;
+  }
+
+  /** Whether JSON floats decode as BigDecimal for this client. */
+  public boolean bigDecimals() {
+    return bigDecimals;
   }
 
   /**
@@ -74,32 +104,40 @@ public final class Transport {
     if (body != null) {
       builder.header("Content-Type", "application/json");
     }
-    if (timeout != null) {
-      builder.timeout(timeout);
-    }
+    builder.timeout(timeout);
     HttpRequest request = builder.build();
+    boolean idempotent = !method.equals("POST") && !method.equals("PATCH");
 
     for (int attempt = 0; ; attempt++) {
       HttpResponse<String> response = send(request, BodyHandlers.ofString());
       if (response.statusCode() < 400) {
-        return Json.envelope(response.body());
+        return Json.envelope(response.body(), bigDecimals);
       }
       HotApiException error =
-          HotApiException.parse(response.statusCode(), response.body(), response.headers());
-      if (response.statusCode() == 429
-          && attempt < MAX_RETRIES
-          && error.retryAfter() != null
-          && error.retryAfter() > 0) {
-        sleepSeconds(Math.min(error.retryAfter(), MAX_RETRY_AFTER_SECONDS));
+          HotApiException.parse(
+              response.statusCode(), response.body(), response.headers(), path);
+      int status = response.statusCode();
+      Integer retryAfter = error.retryAfter();
+      if (attempt < MAX_RETRIES && status == 429 && retryAfter != null && retryAfter > 0) {
+        sleepMillis(Math.min(retryAfter, MAX_RETRY_AFTER_SECONDS) * 1000L);
+        continue;
+      }
+      boolean unavailable = status == 502 || status == 503 || status == 504;
+      if (attempt < MAX_RETRIES && idempotent && unavailable) {
+        long backoff = Backoff.delayMillis(attempt + 1);
+        if (retryAfter != null && retryAfter > 0) {
+          backoff = Math.max(backoff, Math.min(retryAfter, MAX_RETRY_AFTER_SECONDS) * 1000L);
+        }
+        sleepMillis(backoff);
         continue;
       }
       throw error;
     }
   }
 
-  private static void sleepSeconds(long seconds) {
+  private static void sleepMillis(long millis) {
     try {
-      Thread.sleep(seconds * 1000L);
+      Thread.sleep(millis);
     } catch (InterruptedException interrupted) {
       Thread.currentThread().interrupt();
       throw new HotTransportException(interrupted);
@@ -129,19 +167,37 @@ public final class Transport {
       } catch (IOException error) {
         text = "";
       }
-      throw HotApiException.parse(response.statusCode(), text, response.headers());
+      throw HotApiException.parse(response.statusCode(), text, response.headers(), path);
     }
     return response;
   }
 
   /** Opens an SSE request and returns an event iterator. */
   public SseEvents stream(String method, String path, Object body, Map<String, String> query) {
+    return stream(method, path, body, query, null, null);
+  }
+
+  /**
+   * Opens an SSE request. {@code headerTimeout} bounds the wait for response headers (it does not
+   * limit the body); {@code idleTimeout} fails the stream when no line, keepalives included,
+   * arrives for that long. Either may be null.
+   */
+  public SseEvents stream(
+      String method,
+      String path,
+      Object body,
+      Map<String, String> query,
+      Duration headerTimeout,
+      Duration idleTimeout) {
     BodyPublisher publisher =
         body == null ? BodyPublishers.noBody() : BodyPublishers.ofString(Json.write(body));
     HttpRequest.Builder builder =
         newRequest(method, path, query, publisher).header("Accept", "text/event-stream");
     if (body != null) {
       builder.header("Content-Type", "application/json");
+    }
+    if (headerTimeout != null) {
+      builder.timeout(headerTimeout);
     }
 
     HttpResponse<Stream<String>> response = send(builder.build(), BodyHandlers.ofLines());
@@ -150,9 +206,9 @@ public final class Transport {
       try (Stream<String> lines = response.body()) {
         text = lines.collect(Collectors.joining("\n"));
       }
-      throw HotApiException.parse(response.statusCode(), text, response.headers());
+      throw HotApiException.parse(response.statusCode(), text, response.headers(), path);
     }
-    return new SseEvents(response);
+    return new SseEvents(response, bigDecimals, idleTimeout);
   }
 
   private HttpRequest.Builder newRequest(

@@ -156,6 +156,56 @@ class IntegrationTest {
         "unexpected failure message: " + error.getMessage());
   }
 
+  @Test
+  void callHotDeliversChunksSentBeforeRunStart() {
+    // hot d5dde71 sends stream:data and run:stop before run:start (hot PR 4 changes the order).
+    List<String> chunks = new java.util.ArrayList<>();
+    Object result =
+        client()
+            .events()
+            .callHot(
+                "::fixture::sdk/stream-chunks",
+                List.of(),
+                new CallOptions().onChunk(chunks::add));
+    assertEquals("done", result);
+    assertEquals(List.of("a", "b", "c"), chunks);
+  }
+
+  @Test
+  void waitForRunResultFollowsAHandlerRetry() {
+    HotClient client = client();
+    Map<String, Object> published =
+        client.events().publish(Map.of("event_type", "sdk:flaky", "event_data", Map.of()));
+
+    Map<String, Object> run =
+        client
+            .streams()
+            .waitForRunResult(
+                (String) published.get("stream_id"), (String) published.get("event_id"));
+
+    assertEquals("succeeded", run.get("status"));
+    assertNotNull(run.get("origin_run_id"), "expected the retry run: " + run);
+    assertEquals(Boolean.TRUE, castMap(run.get("result")).get("recovered"));
+  }
+
+  @Test
+  void subscribeWithEventEndsAtTheRetryRun() {
+    String lastType = null;
+    Map<String, Object> lastRun = null;
+    try (StreamEvents events =
+        client()
+            .streams()
+            .subscribeWithEvent(Map.of("event_type", "sdk:flaky", "event_data", Map.of()))) {
+      while (events.hasNext()) {
+        Map<String, Object> event = events.next();
+        lastType = StreamEvents.typeOf(event);
+        lastRun = StreamEvents.runOf(event);
+      }
+    }
+    assertEquals("run:stop", lastType);
+    assertEquals("succeeded", lastRun.get("status"));
+  }
+
   @SuppressWarnings("unchecked")
   private static Map<String, Object> castMap(Object value) {
     return (Map<String, Object>) value;
