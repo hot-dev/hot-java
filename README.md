@@ -177,6 +177,7 @@ BigDecimal total = (BigDecimal) client.events().callHot("::billing/total", List.
 - `client.runs()` — list, inspect, subscribe to, and wait for durable runs
 - `client.tasks()` — get, subscribe to, and wait for durable background tasks
 - `client.files()` — upload, download, list, and delete files (including multipart uploads)
+- `client.blobs()` — download large payloads spilled to blob storage by `blob_ref_id` (environment API keys only)
 - `client.projects()` — create, list, update, activate, deactivate, and delete projects
 - `client.builds()` — upload, download, deploy, and look up live/deployed builds
 - `client.context()` — manage encrypted project context variables

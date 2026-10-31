@@ -25,11 +25,11 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # The matrix JDK is the toolchain for compiling and running tests; Gradle runs on 21.
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: |
@@ -37,7 +37,7 @@ jobs:
             21
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       - name: Build and test
         run: >-
@@ -50,16 +50,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       - name: Install hot
         uses: hot-dev/setup-hot@92cf9e03f49293fb31f28a56ed2c85a3424d90ad # v1
@@ -80,16 +80,16 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - name: Checkout SDK
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # A released CLI may lag these API changes. Pin the tested server source
       # separately so its schema, runtime qualification, and OpenAPI agree.
       # Scheduled runs build hot main instead, so API drift shows up weekly.
       - name: Checkout matching Hot server
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: hot-dev/hot
-          ref: ${{ github.event_name == 'schedule' && 'main' || 'd5dde712f447daf88c38e5546f805496c46a2877' }} # Keep the SHA aligned with integration/hot-server.ref
+          ref: ${{ github.event_name == 'schedule' && 'main' || 'd7700112ada1f75211e3b6e66519e9388998f045' }} # Keep the SHA aligned with integration/hot-server.ref
           path: .hot-server
           persist-credentials: false
 
@@ -105,7 +105,7 @@ jobs:
           fi
 
       - name: Set up Python for the fixture
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -143,13 +143,13 @@ jobs:
         run: cargo build --locked --package hot_cli --jobs 4
 
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       - name: Test the org API and isolation with restricted runtime credentials
         run: |

@@ -26,7 +26,9 @@ class DecimalTest {
 
   @BeforeEach
   void start() {
-    server = new WireMockServer(options().dynamicPort());
+    // HTTP/1.1 only, as the Hot API serves plain HTTP: the JDK 17 client
+    // drops reused h2c connections mid-retry.
+    server = new WireMockServer(options().dynamicPort().http2PlainDisabled(true));
     server.start();
     server.stubFor(
         post(urlPathEqualTo("/v1/streams/subscribe-with-event"))

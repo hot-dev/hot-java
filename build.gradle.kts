@@ -1,6 +1,6 @@
 plugins {
     `java-library`
-    id("com.vanniktech.maven.publish") version "0.34.0"
+    id("com.vanniktech.maven.publish") version "0.37.0"
 }
 
 group = property("GROUP") as String
@@ -38,10 +38,10 @@ tasks.withType<Javadoc>().configureEach {
 dependencies {
     // The BOM aligns jackson-core and jackson-annotations with databind. The published POM
     // carries the resolved 2.18.12 versions (see versionMapping below).
-    implementation(platform("com.fasterxml.jackson:jackson-bom:2.18.12"))
+    implementation(platform("com.fasterxml.jackson:jackson-bom:2.22.4"))
     implementation("com.fasterxml.jackson.core:jackson-databind")
 
-    testImplementation(platform("org.junit:junit-bom:5.11.4"))
+    testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation("org.wiremock:wiremock-jetty12:3.13.2")
@@ -50,9 +50,9 @@ dependencies {
     // 2026-10-30). Tests also run against the Jackson version the SDK ships. Handlebars stays at
     // WireMock's 4.3.1: 4.5 (which fixes GHSA-r4gv-qr8j-p3pg) removed helpers WireMock 3.13 loads,
     // and these tests use no response templating.
-    testImplementation(enforcedPlatform("com.fasterxml.jackson:jackson-bom:2.18.12"))
-    testImplementation(platform("org.eclipse.jetty:jetty-bom:12.0.40"))
-    testImplementation(platform("org.eclipse.jetty.ee10:jetty-ee10-bom:12.0.40"))
+    testImplementation(enforcedPlatform("com.fasterxml.jackson:jackson-bom:2.22.4"))
+    testImplementation(platform("org.eclipse.jetty:jetty-bom:12.1.14"))
+    testImplementation(platform("org.eclipse.jetty.ee10:jetty-ee10-bom:12.1.14"))
     constraints {
         testImplementation("com.google.guava:guava:33.7.2-jre")
         testImplementation("org.apache.httpcomponents.client5:httpclient5:5.6.5")
