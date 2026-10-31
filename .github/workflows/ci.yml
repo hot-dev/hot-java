@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly: the org API isolation job builds hot main instead of the pin, to catch API drift.
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,24 +18,32 @@ jobs:
     name: Test (JDK ${{ matrix.java }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        java: ["17", "21"]
+        # 17 is the baseline (--release 17); 21 and 25 are the current LTS releases.
+        java: ["17", "21", "25"]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # The matrix JDK is the toolchain for compiling and running tests; Gradle runs on 21.
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: |
+            ${{ matrix.java }}
+            21
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
 
       - name: Build and test
-        run: ./gradlew build -PjavaToolchainVersion=${{ matrix.java }}
+        run: >-
+          ./gradlew build javadoc
+          -PjavaToolchainVersion=${{ matrix.java }}
+          -Porg.gradle.java.installations.fromEnv=JAVA_HOME_${{ matrix.java }}_X64
 
   integration:
     name: Integration (hot dev)
@@ -55,8 +67,8 @@ jobs:
       - name: Run integration tests
         run: ./integration/run.sh
 
-  postgres-isolation:
-    name: PostgreSQL Sub-org Isolation
+  org-api-isolation:
+    name: Org API isolation (PostgreSQL)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -72,15 +84,17 @@ jobs:
 
       # A released CLI may lag these API changes. Pin the tested server source
       # separately so its schema, runtime qualification, and OpenAPI agree.
+      # Scheduled runs build hot main instead, so API drift shows up weekly.
       - name: Checkout matching Hot server
         uses: actions/checkout@v5
         with:
           repository: hot-dev/hot
-          ref: d5dde712f447daf88c38e5546f805496c46a2877 # Keep aligned with integration/hot-server.ref
+          ref: ${{ github.event_name == 'schedule' && 'main' || 'd5dde712f447daf88c38e5546f805496c46a2877' }} # Keep the SHA aligned with integration/hot-server.ref
           path: .hot-server
           persist-credentials: false
 
       - name: Verify matching Hot revision
+        if: github.event_name != 'schedule'
         shell: bash
         run: |
           expected="$(cat integration/hot-server.ref)"
@@ -137,7 +151,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
 
-      - name: Test PostgreSQL isolation with restricted runtime credentials
+      - name: Test the org API and isolation with restricted runtime credentials
         run: |
           python3 integration/suborg_fixture.py \
             --backend postgres \

@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      test-dependencies:
+        patterns:
+          - "org.junit*"
+          - "org.wiremock*"
+          - "org.eclipse.jetty*"
+          - "org.apache.httpcomponents*"
+          - "com.google.guava*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
