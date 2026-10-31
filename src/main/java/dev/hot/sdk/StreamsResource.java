@@ -55,7 +55,7 @@ public final class StreamsResource {
   /**
    * Subscribes to a stream and returns the run object once the run created by {@code eventId}
    * reaches run:stop. run:fail and run:cancel become {@link HotRunException} carrying the run's
-   * result message; a pending_retry failure instead waits for the retry run.
+   * result message; a failure that is being retried instead waits for the retry run.
    */
   public Map<String, Object> waitForRunResult(String streamId, String eventId, WaitOptions options) {
     return RunWaiter.waitForRunResult(
@@ -73,9 +73,11 @@ public final class StreamsResource {
    *
    * <p>The Hot API closes every SSE subscription 5 minutes after it opens, with stream:complete.
    * While reconnect is enabled (the default), the SDK resubscribes to the same stream_id and
-   * keeps yielding events until the published event's final run:stop/run:fail/run:cancel. A
-   * run:fail with status pending_retry is yielded but does not end the iterator: the retry run,
-   * linked by origin_run_id, does. Replayed run:start and terminal events are deduped by run_id;
+   * keeps yielding events until the published event's final run:stop/run:fail/run:cancel.
+   * Events of a retried attempt (status pending_retry, or a replayed failure whose retry_attempt
+   * shows a scheduled retry) are yielded but do not end the iterator: the retry run, linked by
+   * origin_run_id, does. A failure that announced a retry ends the iterator only when no retry
+   * run appears within 5 seconds. Replayed run:start and terminal events are deduped by run_id;
    * stream:data chunks are not replayed and may be lost across the reconnect window.
    */
   public StreamEvents subscribeWithEvent(

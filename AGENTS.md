@@ -39,8 +39,10 @@ This repo contains the Java SDK for the Hot Dev API.
   permanent 4xx, jittered backoff honouring Retry-After for transient errors,
   a consecutive-failure budget that stream:complete rollovers reset
 - `internal/RunWaiter` / `internal/RunCorrelation` — durable waiters with an
-  absolute deadline; correlate runs by event_id or origin_run_id (retries) and
-  buffer stream:data until the run is correlated
+  absolute deadline; tie runs by event_id or origin_run_id (retries, with
+  orphans keyed by origin), buffer stream:data until the run ties, and hold a
+  failure whose raised retry_attempt announces a retry for a 5 s grace (the
+  API replays retried attempts lossily; same rule as hot-rust's `RunTracker`)
 - one class per resource (mirroring hot-python's resources.py), plus
   `OrgsResource`, `OrgEnv` and `ApiKeysResource` for the org API
 - `OpenApiCoverageTest` — every OpenAPI operation must map to an SDK method or

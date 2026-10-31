@@ -8,14 +8,19 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * subscribeWithEvent's reconnect loop: resubscribes to the same stream_id across the API's
  * 5-minute SSE rollover until the published event's final run event arrives, deduping replayed
  * run:start and terminal events by run_id. Reconnects follow {@link Backoff}: permanent errors
- * stop at once, and only consecutive unproductive connections count against maxAttempts. A
- * pending_retry run:fail is passed through but does not end the iterator; the retry run (linked
- * by origin_run_id) does. Not part of the public API.
+ * stop at once, and only consecutive unproductive connections count against maxAttempts.
+ * Failures of a retried attempt are yielded but do not end the iterator; the retry run (linked by
+ * origin_run_id) does. A failure that announces a retry ends it only when no retry run appears
+ * within the grace (see {@link RunCorrelation}). Not part of the public API.
  */
 public final class ReconnectingEvents implements StreamEvents {
 
@@ -26,7 +31,15 @@ public final class ReconnectingEvents implements StreamEvents {
   private final SubscribeWithEventOptions options;
   private final Set<String> seenStart = new HashSet<>();
   private final Set<String> seenTerminal = new HashSet<>();
-  private final RunCorrelation correlation = new RunCorrelation(null);
+  private final RunCorrelation correlation = new RunCorrelation(null, null);
+
+  private static final ScheduledExecutorService GRACE_WATCHDOG =
+      Executors.newSingleThreadScheduledExecutor(
+          runnable -> {
+            Thread thread = new Thread(runnable, "hot-sdk-retry-grace");
+            thread.setDaemon(true);
+            return thread;
+          });
 
   // volatile: close() may arrive from another thread (AsyncHotClient cancellation).
   private volatile SseEvents source;
@@ -36,6 +49,7 @@ public final class ReconnectingEvents implements StreamEvents {
   private int failures;
   private boolean delivered;
   private boolean terminal;
+  private ScheduledFuture<?> graceCloser;
 
   public ReconnectingEvents(
       Transport transport, Map<String, Object> body, SubscribeWithEventOptions options) {
@@ -77,18 +91,27 @@ public final class ReconnectingEvents implements StreamEvents {
 
   private void advance() {
     while (!done) {
+      if (correlation.graceOver()) {
+        // A held failure's retry run never appeared: that failure (already yielded) is final.
+        close();
+        return;
+      }
       Map<String, Object> event = null;
       RuntimeException failure = null;
       try {
         if (source == null) {
           source = open();
         }
+        armGrace();
         if (source.hasNext()) {
           event = source.next();
         }
       } catch (RuntimeException error) {
         if (done) {
           return;
+        }
+        if (correlation.graceOver()) {
+          continue;
         }
         if (Backoff.isPermanent(error) || streamId == null) {
           close();
@@ -97,11 +120,15 @@ public final class ReconnectingEvents implements StreamEvents {
         failure = error;
       }
       if (event == null) {
+        if (correlation.graceOver()) {
+          continue;
+        }
         onConnectionEnd(failure);
         continue;
       }
 
-      switch (StreamEvents.typeOf(event)) {
+      String type = StreamEvents.typeOf(event);
+      switch (type) {
         case "event:published" -> {
           if (streamId != null) {
             continue;
@@ -113,23 +140,15 @@ public final class ReconnectingEvents implements StreamEvents {
             correlation.eventId(published);
           }
         }
-        case "run:start" -> {
+        case "run:start", "run:stop", "run:fail", "run:cancel" -> {
           String runId = StreamEvents.runIdOf(event);
-          if (runId != null && !seenStart.add(runId)) {
+          Set<String> seen = type.equals("run:start") ? seenStart : seenTerminal;
+          if (runId != null && !seen.add(runId)) {
             continue;
           }
-          correlation.correlate(StreamEvents.runOf(event));
-        }
-        case "run:stop", "run:fail", "run:cancel" -> {
-          String runId = StreamEvents.runIdOf(event);
-          if (runId != null && !seenTerminal.add(runId)) {
-            continue;
-          }
-          Map<String, Object> run = StreamEvents.runOf(event);
-          terminal =
-              correlation.correlate(run)
-                  && !("run:fail".equals(StreamEvents.typeOf(event))
-                      && correlation.superseded(run));
+          // A tied run that stops, fails for good or is cancelled ends the iterator after its
+          // event (or after an earlier orphan event of its retry, replayed now).
+          terminal = correlation.runEvent(type, StreamEvents.runOf(event)).isFinal();
         }
         default -> {}
       }
@@ -137,6 +156,24 @@ public final class ReconnectingEvents implements StreamEvents {
       delivered = true;
       nextEvent = event;
       return;
+    }
+  }
+
+  /** While a failure waits for its retry run, closes the source when the grace ends. */
+  private void armGrace() {
+    Long wakeAt = correlation.wakeAt();
+    if (wakeAt == null) {
+      if (graceCloser != null) {
+        graceCloser.cancel(false);
+        graceCloser = null;
+      }
+      return;
+    }
+    if (graceCloser == null && source != null) {
+      SseEvents current = source;
+      graceCloser =
+          GRACE_WATCHDOG.schedule(
+              current::close, Math.max(0, wakeAt - System.nanoTime()), TimeUnit.NANOSECONDS);
     }
   }
 
@@ -204,6 +241,10 @@ public final class ReconnectingEvents implements StreamEvents {
   }
 
   private void closeSource() {
+    if (graceCloser != null) {
+      graceCloser.cancel(false);
+      graceCloser = null;
+    }
     SseEvents current = source;
     source = null;
     if (current != null) {

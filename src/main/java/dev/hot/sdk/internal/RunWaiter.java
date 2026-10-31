@@ -66,7 +66,7 @@ public final class RunWaiter {
       Duration timeout,
       Consumer<String> onChunk,
       int maxAttempts) {
-    RunState state = new RunState(eventId);
+    RunState state = new RunState(eventId, onChunk);
     state.streamId = streamId;
     return loop(
         deadline(timeout),
@@ -87,7 +87,12 @@ public final class RunWaiter {
 
           @Override
           public Map<String, Object> consume(SseEvents events, long deadline, Progress progress) {
-            return consumeRun(events, state, deadline, onChunk, false, progress);
+            return consumeRun(events, state, deadline, false, progress);
+          }
+
+          @Override
+          public void beforeTimeout() {
+            settle(state.correlation.expire());
           }
         });
   }
@@ -108,7 +113,7 @@ public final class RunWaiter {
       Duration timeout,
       Consumer<String> onChunk,
       int maxAttempts) {
-    RunState state = new RunState(null);
+    RunState state = new RunState(null, onChunk);
     Map<String, Object> body =
         Map.of("event_type", "hot:call", "event_data", Map.of("fn", fn, "args", args));
     return loop(
@@ -146,12 +151,17 @@ public final class RunWaiter {
 
           @Override
           public Map<String, Object> consume(SseEvents events, long deadline, Progress progress) {
-            return consumeRun(events, state, deadline, onChunk, true, progress);
+            return consumeRun(events, state, deadline, true, progress);
           }
 
           @Override
           public boolean canReconnect() {
             return state.streamId != null && state.correlation.eventId() != null;
+          }
+
+          @Override
+          public void beforeTimeout() {
+            settle(state.correlation.expire());
           }
         });
   }
@@ -273,6 +283,9 @@ public final class RunWaiter {
     default boolean canReconnect() {
       return true;
     }
+
+    /** Runs at the deadline, before the timeout is thrown; may throw a held result instead. */
+    default void beforeTimeout() {}
   }
 
   /** What one connection achieved, for the consecutive-failure budget. */
@@ -297,6 +310,7 @@ public final class RunWaiter {
     while (true) {
       long remaining = deadline - System.nanoTime();
       if (remaining <= 0) {
+        connection.beforeTimeout();
         throw new HotTimeoutException(timeoutMessage);
       }
       Progress progress = new Progress();
@@ -313,7 +327,10 @@ public final class RunWaiter {
         } finally {
           closer.cancel(false);
         }
-      } catch (HotRunException | HotTaskException | HotTimeoutException error) {
+      } catch (HotRunException | HotTaskException error) {
+        throw error;
+      } catch (HotTimeoutException error) {
+        connection.beforeTimeout();
         throw error;
       } catch (RuntimeException error) {
         if (Backoff.isPermanent(error)) {
@@ -322,6 +339,7 @@ public final class RunWaiter {
         failure = error;
       }
       if (expired(deadline) || hitHeaderTimeout(failure)) {
+        connection.beforeTimeout();
         throw new HotTimeoutException(timeoutMessage, failure);
       }
       if (!connection.canReconnect()) {
@@ -343,8 +361,13 @@ public final class RunWaiter {
         }
         throw new HotStreamException(endedMessage);
       }
-      Backoff.sleep(
-          Backoff.reconnectDelayMillis(failures, failure), deadline, timeoutMessage, failure);
+      try {
+        Backoff.sleep(
+            Backoff.reconnectDelayMillis(failures, failure), deadline, timeoutMessage, failure);
+      } catch (HotTimeoutException timeout) {
+        connection.beforeTimeout();
+        throw timeout;
+      }
     }
   }
 
@@ -352,65 +375,104 @@ public final class RunWaiter {
       SseEvents events,
       RunState state,
       long deadline,
-      Consumer<String> onChunk,
       boolean capturePublished,
       Progress progress) {
     RunCorrelation correlation = state.correlation;
-    while (events.hasNext()) {
-      Map<String, Object> event = events.next();
-      if (expired(deadline)) {
-        throw new HotTimeoutException(RUN_RESULT_TIMEOUT);
-      }
+    // While a failure waits for its retry run, a watchdog closes the stream when its grace ends,
+    // so the read below cannot block past it.
+    ScheduledFuture<?> graceCloser = null;
+    try {
+      graceCloser = armGrace(events, correlation, graceCloser);
+      while (events.hasNext()) {
+        Map<String, Object> event = events.next();
+        if (expired(deadline)) {
+          settle(correlation.expire());
+          throw new HotTimeoutException(RUN_RESULT_TIMEOUT);
+        }
 
-      String type = StreamEvents.typeOf(event);
-      if (type.equals("event:published")) {
-        if (capturePublished && state.streamId == null) {
-          if (event.get("stream_id") instanceof String streamId) {
-            state.streamId = streamId;
+        String type = StreamEvents.typeOf(event);
+        if (type.equals("event:published")) {
+          if (capturePublished && state.streamId == null) {
+            if (event.get("stream_id") instanceof String streamId) {
+              state.streamId = streamId;
+            }
+            if (event.get("event_id") instanceof String eventId) {
+              correlation.eventId(eventId);
+            }
+            progress.delivered = true;
           }
-          if (event.get("event_id") instanceof String eventId) {
-            correlation.eventId(eventId);
-          }
+          continue;
+        }
+        if (type.equals("stream:data")) {
+          // stream:data is never replayed, so every chunk is new.
+          progress.delivered = true;
+          correlation.chunk(event);
+          continue;
+        }
+        if (!type.startsWith("run:")) {
+          continue;
+        }
+        String runId = StreamEvents.runIdOf(event);
+        if (runId == null) {
+          continue;
+        }
+        // Run events are replayed on every new connection; only first sightings are progress.
+        if (state.seen.add(type + " " + runId)) {
           progress.delivered = true;
         }
-        continue;
-      }
-      if (type.equals("stream:data")) {
-        // stream:data is never replayed, so every chunk is new.
-        progress.delivered = true;
-        correlation.chunk(event, onChunk);
-        continue;
-      }
-      if (!type.startsWith("run:")) {
-        continue;
-      }
-      Map<String, Object> run = StreamEvents.runOf(event);
-      String runId = StreamEvents.runIdOf(event);
-      if (runId == null) {
-        continue;
-      }
-      // Run events are replayed on every new connection; only first sightings are progress.
-      if (state.seen.add(type + " " + runId)) {
-        progress.delivered = true;
-      }
-      if (!correlation.correlate(run)) {
-        continue;
-      }
-      correlation.flush(run, onChunk);
-      switch (type) {
-        case "run:stop" -> {
-          return run;
+        Map<String, Object> result = settle(correlation.runEvent(type, StreamEvents.runOf(event)));
+        if (result != null) {
+          return result;
         }
-        case "run:fail" -> {
-          if (!correlation.superseded(run)) {
-            throw new HotRunException(runResultMessage(run, "Run failed"), run);
-          }
-        }
-        case "run:cancel" -> throw new HotRunException(runResultMessage(run, "Run cancelled"), run);
-        default -> {}
+        graceCloser = armGrace(events, correlation, graceCloser);
+      }
+    } catch (HotTransportException closed) {
+      // The grace watchdog closed the stream: the held failure stands.
+      if (!correlation.graceOver()) {
+        throw closed;
+      }
+    } finally {
+      if (graceCloser != null) {
+        graceCloser.cancel(false);
       }
     }
+    if (correlation.graceOver()) {
+      settle(correlation.expire());
+    }
     return null;
+  }
+
+  /**
+   * Schedules (or cancels) the close of {@code events} at the end of a held failure's grace, and
+   * returns the scheduled close.
+   */
+  private static ScheduledFuture<?> armGrace(
+      StreamEvents events, RunCorrelation correlation, ScheduledFuture<?> current) {
+    Long wakeAt = correlation.wakeAt();
+    if (wakeAt == null) {
+      if (current != null) {
+        current.cancel(false);
+      }
+      return null;
+    }
+    if (current != null) {
+      return current;
+    }
+    long delay = Math.max(0, wakeAt - System.nanoTime());
+    return WATCHDOG.schedule(events::close, delay, TimeUnit.NANOSECONDS);
+  }
+
+  /** Returns a stopped run, throws for a final failure or cancellation, else returns null. */
+  private static Map<String, Object> settle(RunCorrelation.Outcome outcome) {
+    switch (outcome.kind()) {
+      case STOP:
+        return outcome.run();
+      case FAIL:
+        String fallback = "run:cancel".equals(outcome.type()) ? "Run cancelled" : "Run failed";
+        throw new HotRunException(runResultMessage(outcome.run(), fallback), outcome.run());
+      default:
+        return null;
+    }
   }
 
   /**
@@ -446,8 +508,8 @@ public final class RunWaiter {
     private final RunCorrelation correlation;
     private final Set<String> seen = new HashSet<>();
 
-    private RunState(String eventId) {
-      this.correlation = new RunCorrelation(eventId);
+    private RunState(String eventId, Consumer<String> onChunk) {
+      this.correlation = new RunCorrelation(eventId, onChunk);
     }
   }
 

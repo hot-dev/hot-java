@@ -148,9 +148,13 @@ for response headers, the stream and any backoff. Connections that receive
 nothing for 45 seconds (the API sends a keepalive every 15 s) are treated as
 dead and reconnected.
 
-A handler with `retry` options reports a failed attempt as `run:fail` with
-status `pending_retry`. Waiters and `subscribeWithEvent` keep going and return
-the retry run, which the API links to the first attempt by `origin_run_id`.
+A handler with `retry` options reports a failed attempt with status
+`pending_retry`. Waiters and `subscribeWithEvent` keep going and return the
+retry run, which the API links to the first attempt by `origin_run_id`. Replays
+of a retried attempt can also arrive as `run:fail` with status `failed` before
+the retry run exists; such a failure (its `retry_attempt` shows a retry was
+scheduled) is reported only if no retry run appears within 5 seconds, or by the
+waiter's deadline.
 
 ### Decimal values
 
