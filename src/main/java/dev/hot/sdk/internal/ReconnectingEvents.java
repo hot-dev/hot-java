@@ -1,8 +1,6 @@
 package dev.hot.sdk.internal;
 
-import dev.hot.sdk.HotApiException;
 import dev.hot.sdk.HotStreamException;
-import dev.hot.sdk.HotTransportException;
 import dev.hot.sdk.StreamEvents;
 import dev.hot.sdk.SubscribeWithEventOptions;
 import java.util.HashMap;
@@ -12,25 +10,32 @@ import java.util.NoSuchElementException;
 import java.util.Set;
 
 /**
- * subscribeWithEvent's reconnect loop: resubscribes to the same stream_id across the API's 5-minute
- * SSE timeout until a terminal run event arrives, deduping replayed run:start and terminal events
- * by run_id. Not part of the public API.
+ * subscribeWithEvent's reconnect loop: resubscribes to the same stream_id across the API's
+ * 5-minute SSE rollover until the published event's final run event arrives, deduping replayed
+ * run:start and terminal events by run_id. Reconnects follow {@link Backoff}: permanent errors
+ * stop at once, and only consecutive unproductive connections count against maxAttempts. A
+ * pending_retry run:fail is passed through but does not end the iterator; the retry run (linked
+ * by origin_run_id) does. Not part of the public API.
  */
 public final class ReconnectingEvents implements StreamEvents {
+
+  private static final String NEVER = "stream ended before the published event's run completed";
 
   private final Transport transport;
   private final Map<String, Object> body;
   private final SubscribeWithEventOptions options;
   private final Set<String> seenStart = new HashSet<>();
   private final Set<String> seenTerminal = new HashSet<>();
+  private final RunCorrelation correlation = new RunCorrelation(null);
 
-  private StreamEvents source;
+  // volatile: close() may arrive from another thread (AsyncHotClient cancellation).
+  private volatile SseEvents source;
+  private volatile boolean done;
   private Map<String, Object> nextEvent;
   private String streamId;
-  private String eventId;
-  private int attempts;
+  private int failures;
+  private boolean delivered;
   private boolean terminal;
-  private boolean done;
 
   public ReconnectingEvents(
       Transport transport, Map<String, Object> body, SubscribeWithEventOptions options) {
@@ -67,45 +72,45 @@ public final class ReconnectingEvents implements StreamEvents {
   @Override
   public void close() {
     done = true;
-    if (source != null) {
-      source.close();
-      source = null;
-    }
+    closeSource();
   }
 
   private void advance() {
     while (!done) {
-      Map<String, Object> event;
+      Map<String, Object> event = null;
+      RuntimeException failure = null;
       try {
         if (source == null) {
           source = open();
         }
-        if (!source.hasNext()) {
-          onConnectionEnd();
-          continue;
+        if (source.hasNext()) {
+          event = source.next();
         }
-        event = source.next();
       } catch (RuntimeException error) {
-        if (error instanceof HotApiException apiError && apiError.isAuthorizationFailure()) {
+        if (done) {
+          return;
+        }
+        if (Backoff.isPermanent(error) || streamId == null) {
           close();
           throw error;
         }
-        if (streamId == null || attempts >= options.maxAttempts()) {
-          done = true;
-          throw error;
-        }
-        closeSource();
-        backoff();
+        failure = error;
+      }
+      if (event == null) {
+        onConnectionEnd(failure);
         continue;
       }
 
       switch (StreamEvents.typeOf(event)) {
         case "event:published" -> {
+          if (streamId != null) {
+            continue;
+          }
           if (event.get("stream_id") instanceof String published) {
             streamId = published;
           }
           if (event.get("event_id") instanceof String published) {
-            eventId = published;
+            correlation.eventId(published);
           }
         }
         case "run:start" -> {
@@ -113,6 +118,7 @@ public final class ReconnectingEvents implements StreamEvents {
           if (runId != null && !seenStart.add(runId)) {
             continue;
           }
+          correlation.correlate(StreamEvents.runOf(event));
         }
         case "run:stop", "run:fail", "run:cancel" -> {
           String runId = StreamEvents.runIdOf(event);
@@ -120,29 +126,47 @@ public final class ReconnectingEvents implements StreamEvents {
             continue;
           }
           Map<String, Object> run = StreamEvents.runOf(event);
-          terminal = run != null && eventId != null && eventId.equals(run.get("event_id"));
+          terminal =
+              correlation.correlate(run)
+                  && !("run:fail".equals(StreamEvents.typeOf(event))
+                      && correlation.superseded(run));
         }
         default -> {}
       }
 
+      delivered = true;
       nextEvent = event;
       return;
     }
   }
 
-  private StreamEvents open() {
+  private SseEvents open() {
     Map<String, String> query = new HashMap<>();
     if (options.project() != null) {
       query.put("project", options.project());
     }
+    // Without a deadline, the idle timeout also bounds the wait for response headers.
     if (streamId == null) {
-      return transport.stream("POST", "/streams/subscribe-with-event", body, query);
+      return transport.stream(
+          "POST",
+          "/streams/subscribe-with-event",
+          body,
+          query,
+          RunWaiter.IDLE_TIMEOUT,
+          RunWaiter.IDLE_TIMEOUT);
     }
     return transport.stream(
-        "GET", "/streams/" + Transport.enc(streamId) + "/subscribe", null, query);
+        "GET",
+        "/streams/" + Transport.enc(streamId) + "/subscribe",
+        null,
+        query,
+        RunWaiter.IDLE_TIMEOUT,
+        RunWaiter.IDLE_TIMEOUT);
   }
 
-  private void onConnectionEnd() {
+  /** Decides what follows a connection that ended cleanly ({@code error} null) or failed. */
+  private void onConnectionEnd(RuntimeException error) {
+    boolean rolledOver = source != null && source.sawComplete();
     closeSource();
     if (terminal) {
       done = true;
@@ -150,31 +174,40 @@ public final class ReconnectingEvents implements StreamEvents {
     }
     if (streamId == null) {
       done = true;
+      if (error != null) {
+        throw error;
+      }
       throw new HotStreamException("stream ended before event:published was received");
     }
-    if (attempts >= options.maxAttempts()) {
-      done = true;
-      throw new HotStreamException("stream ended before the published event's run completed");
+    boolean productive = delivered || rolledOver;
+    delivered = false;
+    if (productive) {
+      failures = 0;
+      if (error == null) {
+        return;
+      }
     }
-    backoff();
+    failures++;
+    if (failures > options.maxAttempts()) {
+      done = true;
+      if (error != null) {
+        throw error;
+      }
+      throw new HotStreamException(NEVER);
+    }
+    try {
+      Backoff.sleep(Backoff.reconnectDelayMillis(failures, error), Long.MAX_VALUE, NEVER, error);
+    } catch (RuntimeException interrupted) {
+      done = true;
+      throw interrupted;
+    }
   }
 
   private void closeSource() {
-    if (source != null) {
-      source.close();
-      source = null;
-    }
-  }
-
-  private void backoff() {
-    attempts++;
-    long delayMillis = Math.min(250L * attempts, 2000L);
-    try {
-      Thread.sleep(delayMillis);
-    } catch (InterruptedException error) {
-      Thread.currentThread().interrupt();
-      done = true;
-      throw new HotTransportException(error);
+    SseEvents current = source;
+    source = null;
+    if (current != null) {
+      current.close();
     }
   }
 }

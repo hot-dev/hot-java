@@ -26,15 +26,29 @@ class OpenApiCoverageTest {
 
   private static Map<String, String> buildCoverage() {
     Map<String, String> coverage = new LinkedHashMap<>();
-    coverage.put("GET /v1/management/children", "management.listChildren");
-    coverage.put("POST /v1/management/children", "management.createChild");
-    coverage.put("PATCH /v1/management/children/{child_id}/state", "management.setChildState");
-    coverage.put(
-        "POST /v1/management/children/{child_id}/environments", "management.createEnvironment");
-    coverage.put(
-        "POST /v1/management/children/{child_id}/environments/{env_id}/api-keys",
-        "management.createApiKey");
-    coverage.put("GET /v1/management/usage", "management.usage");
+    // Org API (org API keys).
+    coverage.put("GET /v1/orgs", "orgs.list");
+    coverage.put("POST /v1/orgs", "orgs.create");
+    coverage.put("GET /v1/orgs/{org_id}", "orgs.get");
+    coverage.put("PATCH /v1/orgs/{org_id}", "orgs.update");
+    coverage.put("GET /v1/orgs/{org_id}/usage", "orgs.usage");
+    coverage.put("DELETE /v1/orgs/{org_id}/calls", "orgs.purgeCalls");
+    coverage.put("GET /v1/orgs/{org_id}/envs", "orgs.listEnvs");
+    coverage.put("POST /v1/orgs/{org_id}/envs", "orgs.createEnv");
+    coverage.put("GET /v1/orgs/{org_id}/envs/{env_id}", "orgs.getEnv");
+    coverage.put("GET /v1/orgs/{org_id}/api-keys", "orgs.listApiKeys");
+    coverage.put("POST /v1/orgs/{org_id}/api-keys", "orgs.createApiKey");
+    coverage.put("GET /v1/orgs/{org_id}/envs/{env_id}/api-keys", "orgs.listEnvApiKeys");
+    coverage.put("POST /v1/orgs/{org_id}/envs/{env_id}/api-keys", "orgs.createEnvApiKey");
+    // The other forwarded project, build and context routes are not in the OpenAPI spec.
+    coverage.put("GET /v1/orgs/{org_id}/envs/{env_id}/projects", "orgEnv.projects.list");
+    coverage.put("GET /v1/api-keys/{key_id}", "apiKeys.get");
+    coverage.put("PATCH /v1/api-keys/{key_id}", "apiKeys.update");
+    coverage.put("DELETE /v1/api-keys/{key_id}", "apiKeys.revoke");
+    coverage.put("POST /v1/api-keys/{key_id}/rotate", "apiKeys.rotate");
+    coverage.put("DELETE /v1/env/calls", "env.purgeCalls");
+    coverage.put("DELETE /v1/runs/{run_id}/calls", "runs.purgeCalls");
+    coverage.put("DELETE /v1/streams/{stream_id}/calls", "streams.purgeCalls");
     coverage.put("GET /status", ""); // public health endpoint
     coverage.put("GET /v1/projects", "projects.list");
     coverage.put("POST /v1/projects", "projects.create");
@@ -125,17 +139,21 @@ class OpenApiCoverageTest {
       if (entry.getValue().isEmpty()) {
         continue;
       }
-      String[] parts = entry.getValue().split("\\.", 2);
+      String[] parts = entry.getValue().split("\\.");
       Object resource;
-      if (parts[0].equals("management")) {
-        resource = HotManagementClient.builder("hm_test").build();
+      if (parts[0].equals("orgEnv")) {
+        resource = client.orgs().env("org", "env");
       } else {
         Method accessor = HotClient.class.getMethod(parts[0]);
         resource = accessor.invoke(client);
       }
+      for (int i = 1; i < parts.length - 1; i++) {
+        resource = resource.getClass().getMethod(parts[i]).invoke(resource);
+      }
+      String name = parts[parts.length - 1];
       boolean exists =
           Arrays.stream(resource.getClass().getMethods())
-              .anyMatch(method -> method.getName().equals(parts[1]));
+              .anyMatch(method -> method.getName().equals(name));
       assertTrue(exists, entry.getKey() + " -> client." + entry.getValue());
     }
   }

@@ -19,6 +19,14 @@ public final class EnvResource {
   }
 
   /**
+   * Deletes every call trace in this environment. Returns {@code {calls_deleted,
+   * blob_refs_released, complete}}; call again while {@code complete} is false.
+   */
+  public Map<String, Object> purgeCalls() {
+    return Json.dataObject(transport.requestJson("DELETE", "/env/calls", null, null));
+  }
+
+  /**
    * Streams environment events. Requires API key credentials and a live API pub/sub backend.
    */
   public StreamEvents subscribe() {

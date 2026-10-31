@@ -13,15 +13,17 @@ public final class SubscribeWithEventOptions {
     return this;
   }
 
-  /**
-   * Automatically resubscribe across the API's 5-minute SSE timeout (default true).
-   */
+  /** Automatically resubscribe across the API's 5-minute SSE rollover (default true). */
   public SubscribeWithEventOptions reconnect(boolean reconnect) {
     this.reconnect = reconnect;
     return this;
   }
 
-  /** Caps reconnection attempts (default 5). */
+  /**
+   * Caps consecutive failed reconnects (default 5). Connections that deliver events or end with
+   * the API's 5-minute stream:complete rollover reset the count, so a long run never exhausts it.
+   * Permanent errors (4xx other than 408 and 429) stop at once.
+   */
   public SubscribeWithEventOptions maxAttempts(int maxAttempts) {
     this.maxAttempts = maxAttempts;
     return this;

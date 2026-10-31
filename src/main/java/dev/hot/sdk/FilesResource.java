@@ -70,7 +70,7 @@ public final class FilesResource {
             null,
             headers,
             BodyPublishers.ofByteArray(content));
-    return Responses.readData(response);
+    return Responses.readData(response, transport.bigDecimals());
   }
 
   /** Starts a multipart upload. */
@@ -87,7 +87,7 @@ public final class FilesResource {
             null,
             Map.of("Accept", "application/json"),
             BodyPublishers.ofByteArray(content));
-    return Responses.readData(response);
+    return Responses.readData(response, transport.bigDecimals());
   }
 
   /** Finishes a multipart upload. */

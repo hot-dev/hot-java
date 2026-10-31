@@ -10,22 +10,29 @@ import java.util.Map;
 public final class ContextResource {
 
   private final Transport transport;
+  private final String prefix;
 
   ContextResource(Transport transport) {
+    this(transport, "");
+  }
+
+  /** {@code prefix} scopes every path, e.g. {@code /orgs/{org}/envs/{env}}. */
+  ContextResource(Transport transport, String prefix) {
     this.transport = transport;
+    this.prefix = prefix;
   }
 
   /** Returns the context variable list envelope for a project. */
   public Map<String, Object> list(String project) {
     return transport.requestJson(
-        "GET", "/projects/" + Transport.enc(project) + "/context", null, null);
+        "GET", projectPath(project) + "/context", null, null);
   }
 
   /** Creates a context variable. */
   public Map<String, Object> create(String project, Map<String, Object> body) {
     return Json.dataObject(
         transport.requestJson(
-            "POST", "/projects/" + Transport.enc(project) + "/context", body, null));
+            "POST", projectPath(project) + "/context", body, null));
   }
 
   /** Replaces a context variable. */
@@ -33,7 +40,7 @@ public final class ContextResource {
     return Json.dataObject(
         transport.requestJson(
             "PUT",
-            "/projects/" + Transport.enc(project) + "/context/" + Transport.enc(key),
+            projectPath(project) + "/context/" + Transport.enc(key),
             body,
             null));
   }
@@ -43,9 +50,13 @@ public final class ContextResource {
     Responses.closeQuietly(
         transport.requestRaw(
             "DELETE",
-            "/projects/" + Transport.enc(project) + "/context/" + Transport.enc(key),
+            projectPath(project) + "/context/" + Transport.enc(key),
             null,
             null,
             BodyPublishers.noBody()));
+  }
+
+  private String projectPath(String project) {
+    return prefix + "/projects/" + Transport.enc(project);
   }
 }

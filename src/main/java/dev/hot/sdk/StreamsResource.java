@@ -1,5 +1,6 @@
 package dev.hot.sdk;
 
+import dev.hot.sdk.internal.Json;
 import dev.hot.sdk.internal.ReconnectingEvents;
 import dev.hot.sdk.internal.RunWaiter;
 import dev.hot.sdk.internal.Transport;
@@ -36,6 +37,16 @@ public final class StreamsResource {
         "POST", "/streams/" + Transport.enc(streamId) + "/subscribe", null, projectQuery(project));
   }
 
+  /**
+   * Deletes the call traces of every run on a stream. Returns {@code {calls_deleted,
+   * blob_refs_released, complete}}.
+   */
+  public Map<String, Object> purgeCalls(String streamId) {
+    return Json.dataObject(
+        transport.requestJson(
+            "DELETE", "/streams/" + Transport.enc(streamId) + "/calls", null, null));
+  }
+
   /** Waits for the run created by {@code eventId} with default options. */
   public Map<String, Object> waitForRunResult(String streamId, String eventId) {
     return waitForRunResult(streamId, eventId, new WaitOptions());
@@ -44,11 +55,11 @@ public final class StreamsResource {
   /**
    * Subscribes to a stream and returns the run object once the run created by {@code eventId}
    * reaches run:stop. run:fail and run:cancel become {@link HotRunException} carrying the run's
-   * result message.
+   * result message; a pending_retry failure instead waits for the retry run.
    */
   public Map<String, Object> waitForRunResult(String streamId, String eventId, WaitOptions options) {
     return RunWaiter.waitForRunResult(
-        transport, streamId, eventId, options.timeout(), options.onChunk());
+        transport, streamId, eventId, options.timeout(), options.onChunk(), options.maxAttempts());
   }
 
   /** Atomically subscribes then publishes an event, with default options. */
@@ -60,11 +71,12 @@ public final class StreamsResource {
    * Atomically subscribes then publishes an event, yielding stream events until the run
    * completes.
    *
-   * <p>The Hot API closes SSE subscriptions after 5 minutes of idle time. While reconnect is
-   * enabled (the default), the SDK resubscribes to the same stream_id and keeps yielding events
-   * until a terminal run:stop/run:fail/run:cancel arrives. Replayed run:start and terminal events
-   * are deduped by run_id; stream:data chunks are not replayed and may be lost across the
-   * disconnect window.
+   * <p>The Hot API closes every SSE subscription 5 minutes after it opens, with stream:complete.
+   * While reconnect is enabled (the default), the SDK resubscribes to the same stream_id and
+   * keeps yielding events until the published event's final run:stop/run:fail/run:cancel. A
+   * run:fail with status pending_retry is yielded but does not end the iterator: the retry run,
+   * linked by origin_run_id, does. Replayed run:start and terminal events are deduped by run_id;
+   * stream:data chunks are not replayed and may be lost across the reconnect window.
    */
   public StreamEvents subscribeWithEvent(
       Map<String, Object> body, SubscribeWithEventOptions options) {

@@ -4,17 +4,41 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
  * Asynchronous Hot API v1 client returning {@link CompletableFuture}s. A thin wrapper over
- * {@link HotClient} that runs each call on the configured executor (default
- * {@link ForkJoinPool#commonPool()}); streaming methods drive the event iterator on that
- * executor and deliver events to a consumer.
+ * {@link HotClient} that runs each call on the configured executor; streaming methods drive the
+ * event iterator on that executor and deliver events to a consumer.
+ *
+ * <p>Calls block a thread for the whole request or wait, so the default executor is a dedicated
+ * pool of daemon threads ({@code hot-sdk-async-N}), not {@link
+ * java.util.concurrent.ForkJoinPool#commonPool()}. Pass your own with {@link #wrap(HotClient,
+ * Executor)}.
+ *
+ * <p>Cancelling a streaming method's future ({@code future.cancel(true)}) closes the underlying
+ * subscription and stops delivering events.
  */
 public final class AsyncHotClient {
+
+  private static final AtomicInteger THREADS = new AtomicInteger();
+
+  // Lazily created: clients wrapping their own executor never start it.
+  private static final class DefaultExecutor {
+    static final ExecutorService INSTANCE =
+        Executors.newCachedThreadPool(
+            runnable -> {
+              Thread thread =
+                  new Thread(runnable, "hot-sdk-async-" + THREADS.incrementAndGet());
+              thread.setDaemon(true);
+              return thread;
+            });
+  }
 
   private final HotClient client;
   private final Executor executor;
@@ -31,6 +55,8 @@ public final class AsyncHotClient {
   private final Domains domains;
   private final Sessions sessions;
   private final ServiceKeys serviceKeys;
+  private final Orgs orgs;
+  private final ApiKeys apiKeys;
 
   private AsyncHotClient(HotClient client, Executor executor) {
     this.client = client;
@@ -48,11 +74,13 @@ public final class AsyncHotClient {
     this.domains = new Domains();
     this.sessions = new Sessions();
     this.serviceKeys = new ServiceKeys();
+    this.orgs = new Orgs();
+    this.apiKeys = new ApiKeys();
   }
 
-  /** Wraps a synchronous client with the common pool. */
+  /** Wraps a synchronous client with the SDK's dedicated daemon thread pool. */
   public static AsyncHotClient wrap(HotClient client) {
-    return wrap(client, ForkJoinPool.commonPool());
+    return wrap(client, DefaultExecutor.INSTANCE);
   }
 
   /** Wraps a synchronous client with an explicit executor. */
@@ -69,16 +97,45 @@ public final class AsyncHotClient {
     return CompletableFuture.supplyAsync(supplier, executor);
   }
 
-  private CompletableFuture<Void> drain(StreamEvents source, Consumer<Map<String, Object>> onEvent) {
-    return CompletableFuture.runAsync(
-        () -> {
-          try (source) {
-            while (source.hasNext()) {
-              onEvent.accept(source.next());
-            }
+  private CompletableFuture<Void> run(Runnable runnable) {
+    return CompletableFuture.runAsync(runnable, executor);
+  }
+
+  /**
+   * Opens a subscription and delivers its events on the executor. Cancelling the returned future
+   * closes the subscription.
+   */
+  private CompletableFuture<Void> drain(
+      Supplier<StreamEvents> open, Consumer<Map<String, Object>> onEvent) {
+    CompletableFuture<Void> result = new CompletableFuture<>();
+    AtomicReference<StreamEvents> current = new AtomicReference<>();
+    result.whenComplete(
+        (ignored, error) -> {
+          StreamEvents source = current.get();
+          if (result.isCancelled() && source != null) {
+            source.close();
           }
-        },
-        executor);
+        });
+    try {
+      executor.execute(
+          () -> {
+            if (result.isDone()) {
+              return;
+            }
+            try (StreamEvents source = open.get()) {
+              current.set(source);
+              while (!result.isDone() && source.hasNext()) {
+                onEvent.accept(source.next());
+              }
+              result.complete(null);
+            } catch (Throwable error) {
+              result.completeExceptionally(error);
+            }
+          });
+    } catch (RuntimeException rejected) {
+      result.completeExceptionally(rejected);
+    }
+    return result;
   }
 
   public Events events() {
@@ -133,6 +190,14 @@ public final class AsyncHotClient {
     return serviceKeys;
   }
 
+  public Orgs orgs() {
+    return orgs;
+  }
+
+  public ApiKeys apiKeys() {
+    return apiKeys;
+  }
+
   /** Async escape hatch mirroring {@link HotClient#request}. */
   public CompletableFuture<Map<String, Object>> request(
       String method, String path, Object body, Map<String, String> query) {
@@ -168,6 +233,10 @@ public final class AsyncHotClient {
 
   /** Async view of {@link RunsResource}. */
   public final class Runs {
+    public CompletableFuture<Map<String, Object>> purgeCalls(String runId) {
+      return supply(() -> client.runs().purgeCalls(runId));
+    }
+
     public CompletableFuture<Map<String, Object>> list(Map<String, String> query) {
       return supply(() -> client.runs().list(query));
     }
@@ -192,8 +261,7 @@ public final class AsyncHotClient {
     /** Streams durable run snapshots to {@code onEvent} until the run is terminal. */
     public CompletableFuture<Void> subscribe(
         String runId, Consumer<Map<String, Object>> onEvent) {
-      return supply(() -> client.runs().subscribe(runId))
-          .thenCompose(source -> drain(source, onEvent));
+      return drain(() -> client.runs().subscribe(runId), onEvent);
     }
   }
 
@@ -203,9 +271,13 @@ public final class AsyncHotClient {
       return supply(() -> client.env().get());
     }
 
+    public CompletableFuture<Map<String, Object>> purgeCalls() {
+      return supply(() -> client.env().purgeCalls());
+    }
+
     /** Streams environment events to {@code onEvent} until the subscription ends. */
     public CompletableFuture<Void> subscribe(Consumer<Map<String, Object>> onEvent) {
-      return supply(() -> client.env().subscribe()).thenCompose(source -> drain(source, onEvent));
+      return drain(() -> client.env().subscribe(), onEvent);
     }
   }
 
@@ -221,8 +293,16 @@ public final class AsyncHotClient {
     /** Streams events to {@code onEvent} until the subscription ends. */
     public CompletableFuture<Void> subscribe(
         String streamId, String project, Consumer<Map<String, Object>> onEvent) {
-      return supply(() -> client.streams().subscribe(streamId, project))
-          .thenCompose(source -> drain(source, onEvent));
+      return drain(() -> client.streams().subscribe(streamId, project), onEvent);
+    }
+
+    public CompletableFuture<Map<String, Object>> purgeCalls(String streamId) {
+      return supply(() -> client.streams().purgeCalls(streamId));
+    }
+
+    public CompletableFuture<Map<String, Object>> waitForRunResult(
+        String streamId, String eventId) {
+      return supply(() -> client.streams().waitForRunResult(streamId, eventId));
     }
 
     public CompletableFuture<Map<String, Object>> waitForRunResult(
@@ -238,8 +318,7 @@ public final class AsyncHotClient {
         Map<String, Object> body,
         SubscribeWithEventOptions options,
         Consumer<Map<String, Object>> onEvent) {
-      return supply(() -> client.streams().subscribeWithEvent(body, options))
-          .thenCompose(source -> drain(source, onEvent));
+      return drain(() -> client.streams().subscribeWithEvent(body, options), onEvent);
     }
   }
 
@@ -260,8 +339,7 @@ public final class AsyncHotClient {
 
     public CompletableFuture<Void> subscribe(
         String taskId, Consumer<Map<String, Object>> onEvent) {
-      return supply(() -> client.tasks().subscribe(taskId))
-          .thenCompose(source -> drain(source, onEvent));
+      return drain(() -> client.tasks().subscribe(taskId), onEvent);
     }
   }
 
@@ -276,7 +354,7 @@ public final class AsyncHotClient {
     }
 
     public CompletableFuture<Void> delete(String fileId) {
-      return CompletableFuture.runAsync(() -> client.files().delete(fileId), executor);
+      return run(() -> client.files().delete(fileId));
     }
 
     public CompletableFuture<Map<String, Object>> upload(
@@ -298,7 +376,7 @@ public final class AsyncHotClient {
     }
 
     public CompletableFuture<Void> abortUpload(String uploadId) {
-      return CompletableFuture.runAsync(() -> client.files().abortUpload(uploadId), executor);
+      return run(() -> client.files().abortUpload(uploadId));
     }
   }
 
@@ -321,7 +399,7 @@ public final class AsyncHotClient {
     }
 
     public CompletableFuture<Void> delete(String project) {
-      return CompletableFuture.runAsync(() -> client.projects().delete(project), executor);
+      return run(() -> client.projects().delete(project));
     }
 
     public CompletableFuture<Map<String, Object>> activate(String project) {
@@ -389,7 +467,7 @@ public final class AsyncHotClient {
     }
 
     public CompletableFuture<Void> delete(String project, String key) {
-      return CompletableFuture.runAsync(() -> client.context().delete(project, key), executor);
+      return run(() -> client.context().delete(project, key));
     }
   }
 
@@ -408,7 +486,7 @@ public final class AsyncHotClient {
     }
 
     public CompletableFuture<Void> delete(String domainId) {
-      return CompletableFuture.runAsync(() -> client.domains().delete(domainId), executor);
+      return run(() -> client.domains().delete(domainId));
     }
 
     public CompletableFuture<Map<String, Object>> verify(String domainId) {
@@ -427,7 +505,7 @@ public final class AsyncHotClient {
     }
 
     public CompletableFuture<Void> revoke(String sessionId) {
-      return CompletableFuture.runAsync(() -> client.sessions().revoke(sessionId), executor);
+      return run(() -> client.sessions().revoke(sessionId));
     }
 
     public CompletableFuture<Map<String, Object>> revokeAll() {
@@ -455,11 +533,135 @@ public final class AsyncHotClient {
     }
 
     public CompletableFuture<Void> revoke(String serviceKeyId) {
-      return CompletableFuture.runAsync(() -> client.serviceKeys().revoke(serviceKeyId), executor);
+      return run(() -> client.serviceKeys().revoke(serviceKeyId));
     }
 
     public CompletableFuture<Map<String, Object>> revokeAll() {
       return supply(() -> client.serviceKeys().revokeAll());
+    }
+  }
+
+  /** Async view of {@link OrgsResource}. */
+  public final class Orgs {
+    public CompletableFuture<Map<String, Object>> list(Map<String, String> query) {
+      return supply(() -> client.orgs().list(query));
+    }
+
+    public CompletableFuture<Map<String, Object>> create(Map<String, Object> body) {
+      return supply(() -> client.orgs().create(body));
+    }
+
+    public CompletableFuture<Map<String, Object>> get(String orgId) {
+      return supply(() -> client.orgs().get(orgId));
+    }
+
+    public CompletableFuture<Map<String, Object>> update(String orgId, Map<String, Object> body) {
+      return supply(() -> client.orgs().update(orgId, body));
+    }
+
+    public CompletableFuture<Map<String, Object>> usage(String rootOrgId) {
+      return supply(() -> client.orgs().usage(rootOrgId));
+    }
+
+    public CompletableFuture<Map<String, Object>> purgeCalls(
+        String orgId, boolean includeSubOrgs) {
+      return supply(() -> client.orgs().purgeCalls(orgId, includeSubOrgs));
+    }
+
+    public CompletableFuture<Map<String, Object>> listEnvs(String orgId) {
+      return supply(() -> client.orgs().listEnvs(orgId));
+    }
+
+    public CompletableFuture<Map<String, Object>> createEnv(
+        String orgId, Map<String, Object> body) {
+      return supply(() -> client.orgs().createEnv(orgId, body));
+    }
+
+    public CompletableFuture<Map<String, Object>> getEnv(String orgId, String envId) {
+      return supply(() -> client.orgs().getEnv(orgId, envId));
+    }
+
+    public CompletableFuture<Map<String, Object>> listApiKeys(
+        String orgId, Map<String, String> query) {
+      return supply(() -> client.orgs().listApiKeys(orgId, query));
+    }
+
+    public CompletableFuture<Map<String, Object>> createApiKey(
+        String orgId, Map<String, Object> body) {
+      return supply(() -> client.orgs().createApiKey(orgId, body));
+    }
+
+    public CompletableFuture<Map<String, Object>> listEnvApiKeys(
+        String orgId, String envId, Map<String, String> query) {
+      return supply(() -> client.orgs().listEnvApiKeys(orgId, envId, query));
+    }
+
+    public CompletableFuture<Map<String, Object>> createEnvApiKey(
+        String orgId, String envId, Map<String, Object> body) {
+      return supply(() -> client.orgs().createEnvApiKey(orgId, envId, body));
+    }
+
+    /** Async view of {@link OrgsResource#env}: projects, builds and context in one environment. */
+    public OrgEnv env(String orgId, String envId) {
+      return new OrgEnv(client.orgs().env(orgId, envId));
+    }
+  }
+
+  /** Async view of {@link dev.hot.sdk.OrgEnv}. */
+  public final class OrgEnv {
+    private final dev.hot.sdk.OrgEnv env;
+
+    private OrgEnv(dev.hot.sdk.OrgEnv env) {
+      this.env = env;
+    }
+
+    public CompletableFuture<Map<String, Object>> listProjects(Map<String, String> query) {
+      return supply(() -> env.projects().list(query));
+    }
+
+    public CompletableFuture<Map<String, Object>> createProject(Map<String, Object> body) {
+      return supply(() -> env.projects().create(body));
+    }
+
+    public CompletableFuture<Map<String, Object>> getProject(String project) {
+      return supply(() -> env.projects().get(project));
+    }
+
+    public CompletableFuture<Map<String, Object>> uploadBuild(String project, BuildUpload upload) {
+      return supply(() -> env.builds().upload(project, upload));
+    }
+
+    public CompletableFuture<Map<String, Object>> deployBuild(String project, String buildId) {
+      return supply(() -> env.builds().deploy(project, buildId));
+    }
+
+    public CompletableFuture<Map<String, Object>> createContext(
+        String project, Map<String, Object> body) {
+      return supply(() -> env.context().create(project, body));
+    }
+
+    /** The synchronous resources, for calls without an async helper here. */
+    public dev.hot.sdk.OrgEnv sync() {
+      return env;
+    }
+  }
+
+  /** Async view of {@link ApiKeysResource}. */
+  public final class ApiKeys {
+    public CompletableFuture<Map<String, Object>> get(String keyId) {
+      return supply(() -> client.apiKeys().get(keyId));
+    }
+
+    public CompletableFuture<Map<String, Object>> update(String keyId, Map<String, Object> body) {
+      return supply(() -> client.apiKeys().update(keyId, body));
+    }
+
+    public CompletableFuture<Void> revoke(String keyId) {
+      return run(() -> client.apiKeys().revoke(keyId));
+    }
+
+    public CompletableFuture<Map<String, Object>> rotate(String keyId, Map<String, Object> body) {
+      return supply(() -> client.apiKeys().rotate(keyId, body));
     }
   }
 }
