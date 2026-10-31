@@ -36,12 +36,29 @@ tasks.withType<Javadoc>().configureEach {
 }
 
 dependencies {
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.18.3")
+    // The BOM aligns jackson-core and jackson-annotations with databind. The published POM
+    // carries the resolved 2.18.12 versions (see versionMapping below).
+    implementation(platform("com.fasterxml.jackson:jackson-bom:2.18.12"))
+    implementation("com.fasterxml.jackson.core:jackson-databind")
 
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-    testImplementation("org.wiremock:wiremock:3.10.0")
+    testImplementation("org.wiremock:wiremock-jetty12:3.13.2")
+
+    // Test-only floors for WireMock's transitive dependencies with published advisories (OSV,
+    // 2026-10-30). Tests also run against the Jackson version the SDK ships. Handlebars stays at
+    // WireMock's 4.3.1: 4.5 (which fixes GHSA-r4gv-qr8j-p3pg) removed helpers WireMock 3.13 loads,
+    // and these tests use no response templating.
+    testImplementation(enforcedPlatform("com.fasterxml.jackson:jackson-bom:2.18.12"))
+    testImplementation(platform("org.eclipse.jetty:jetty-bom:12.0.40"))
+    testImplementation(platform("org.eclipse.jetty.ee10:jetty-ee10-bom:12.0.40"))
+    constraints {
+        testImplementation("com.google.guava:guava:33.7.2-jre")
+        testImplementation("org.apache.httpcomponents.client5:httpclient5:5.6.5")
+        testImplementation("org.apache.httpcomponents.core5:httpcore5:5.4.4")
+        testImplementation("org.apache.httpcomponents.core5:httpcore5-h2:5.4.4")
+    }
 }
 
 tasks.test {
@@ -58,6 +75,18 @@ tasks.test {
         val value = providers.environmentVariable(key)
         if (value.isPresent) {
             environment(key, value.get())
+        }
+    }
+}
+
+// Publish resolved versions, so the POM pins jackson-databind 2.18.12 explicitly rather than
+// leaving it to the imported BOM.
+publishing {
+    publications.withType<MavenPublication>().configureEach {
+        versionMapping {
+            allVariants {
+                fromResolutionResult()
+            }
         }
     }
 }
