@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # The matrix JDK is the toolchain for compiling and running tests; Gradle runs on 21.
       - name: Set up JDK
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Set up JDK
         uses: actions/setup-java@v6
@@ -80,13 +80,13 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - name: Checkout SDK
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       # A released CLI may lag these API changes. Pin the tested server source
       # separately so its schema, runtime qualification, and OpenAPI agree.
       # Scheduled runs build hot main instead, so API drift shows up weekly.
       - name: Checkout matching Hot server
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: hot-dev/hot
           ref: ${{ github.event_name == 'schedule' && 'main' || 'd5dde712f447daf88c38e5546f805496c46a2877' }} # Keep the SHA aligned with integration/hot-server.ref
