@@ -146,7 +146,7 @@ public final class HotClient {
     return serviceKeys;
   }
 
-  /** Org API (org API keys only): child organizations, environments and API keys. */
+  /** Org API (org API keys only): sub-organizations, environments and API keys. */
   public OrgsResource orgs() {
     return orgs;
   }

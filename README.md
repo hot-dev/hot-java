@@ -186,7 +186,7 @@ BigDecimal total = (BigDecimal) client.events().callHot("::billing/total", List.
 - `client.serviceKeys()` — create and revoke scoped service keys
 - `client.org()` — view usage and limits
 - `client.env()` — read environment info, subscribe to environment events, and purge call traces
-- `client.orgs()` — org API: child organizations, environments, and org and environment API keys (org API keys only)
+- `client.orgs()` — org API: sub-organizations, environments, and org and environment API keys (org API keys only)
 - `client.apiKeys()` — read, narrow, rotate, and revoke API keys by id (org API keys only)
 
 Use `client.request(...)` or `client.requestRaw(...)` as an escape hatch for
@@ -203,9 +203,9 @@ the API delivers chunks before `run:start` (hot 3.0.x does for short runs).
 
 ## Org API
 
-An **org API key** manages a root organization's children: it creates child
-organizations and environments, mints environment API keys for them, deploys
-projects into them, and reads account usage. Root administrators create org
+An **org API key** manages a parent organization's sub-organizations: it creates
+them and their environments, mints environment API keys for them, deploys
+projects into them, and reads account usage. Administrators of the parent organization create org
 keys in the Hot App. An org key calls only `client.orgs()` and
 `client.apiKeys()`; every runtime resource (events, streams, runs, projects,
 ...) needs an **environment API key**, session, or service key. Calling the
@@ -215,11 +215,11 @@ credential:
 ```java
 HotClient admin = HotClient.builder(System.getenv("HOT_ORG_API_KEY")).build();
 
-Map<String, Object> child = admin.orgs().create(Map.of(
+Map<String, Object> subOrg = admin.orgs().create(Map.of(
     "name", "Customer", "slug", "customer-123",          // slug: at most 32 characters
     "idempotency_key", "customer-123"));                  // reuse it when retrying
-String orgId = (String) ((Map<?, ?>) child.get("org")).get("org_id");
-String envId = (String) child.get("env_id");             // the child's default environment
+String orgId = (String) ((Map<?, ?>) subOrg.get("org")).get("org_id");
+String envId = (String) subOrg.get("env_id");             // the sub-organization's default environment
 
 Map<String, Object> key = admin.orgs().createEnvApiKey(orgId, envId, Map.of(
     "description", "Customer backend",
@@ -232,11 +232,11 @@ customer.events().publish(Map.of("event_type", "order:placed", "event_data", Map
 | --- | --- |
 | `orgs().list(query)` / `create(body)` / `get(orgId)` | `/v1/orgs`, `/v1/orgs/{org_id}` |
 | `orgs().update(orgId, Map.of("state", "suspended"))` | `active`, `suspended` or `archived`; returns the org |
-| `orgs().usage(rootOrgId)` | Account usage; pass the root org id |
+| `orgs().usage(parentOrgId)` | Account usage; pass the parent organization's id |
 | `orgs().listEnvs(orgId)` / `createEnv(orgId, body)` / `getEnv(orgId, envId)` | Environments (creation is idempotent by name) |
 | `orgs().listApiKeys(orgId)` / `createApiKey(orgId, body)` | Org API keys in the key's own org |
 | `orgs().listEnvApiKeys(orgId, envId)` / `createEnvApiKey(orgId, envId, body)` | Environment API keys |
-| `orgs().env(orgId, envId).projects()` / `.builds()` / `.context()` | Projects, builds, deploys and context in a child environment |
+| `orgs().env(orgId, envId).projects()` / `.builds()` / `.context()` | Projects, builds, deploys and context in a sub-organization's environment |
 | `orgs().purgeCalls(orgId, includeSubOrgs)` | Delete call traces |
 | `apiKeys().get(id)` / `update(id, body)` / `rotate(id, body)` / `revoke(id)` | Any key the org key issued |
 
@@ -264,11 +264,11 @@ python3 integration/suborg_fixture.py --hot ../hot/target/debug/hot --backend po
 # For SQLite, use --backend sqlite.
 ```
 
-Coverage includes child and environment provisioning and idempotency,
+Coverage includes sub-organization and environment provisioning and idempotency,
 identical project names in siblings, foreign-ID and stream denial, key-scope
 errors in both directions, org-scoped projects and context, key rotation and
 revocation, restricted environment-key grants, service and session issuance
-and revocation, revocation and narrowing of an issuing org key, and child
+and revocation, revocation and narrowing of an issuing org key, and sub-organization
 suspension and resumption.
 
 ## Customizing the HTTP Client

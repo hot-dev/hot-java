@@ -559,8 +559,8 @@ public final class AsyncHotClient {
       return supply(() -> client.orgs().update(orgId, body));
     }
 
-    public CompletableFuture<Map<String, Object>> usage(String rootOrgId) {
-      return supply(() -> client.orgs().usage(rootOrgId));
+    public CompletableFuture<Map<String, Object>> usage(String parentOrgId) {
+      return supply(() -> client.orgs().usage(parentOrgId));
     }
 
     public CompletableFuture<Map<String, Object>> purgeCalls(
