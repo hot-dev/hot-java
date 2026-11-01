@@ -5,7 +5,7 @@ import dev.hot.sdk.internal.Transport;
 import java.util.Map;
 
 /**
- * Org API: child organizations, their environments, and org and environment API keys. Needs an
+ * Org API: sub-organizations, their environments, and org and environment API keys. Needs an
  * org API key; other credentials get {@link HotKeyScopeException} with required scope {@code
  * "org"}. An org API key in turn cannot call runtime resources such as {@link
  * HotClient#events()}: mint an environment key with {@link #createEnvApiKey} and use a separate
@@ -19,20 +19,20 @@ public final class OrgsResource {
     this.transport = transport;
   }
 
-  /** Returns the list envelope of child organizations the key may read. */
+  /** Returns the list envelope of sub-organizations the key may read. */
   public Map<String, Object> list() {
     return list(null);
   }
 
-  /** Returns the child organization list envelope, paginated by {@code limit}/{@code offset}. */
+  /** Returns the sub-organization list envelope, paginated by {@code limit}/{@code offset}. */
   public Map<String, Object> list(Map<String, String> query) {
     return transport.requestJson("GET", "/orgs", null, query);
   }
 
   /**
-   * Creates a child organization ({@code name}, {@code slug} of at most 32 characters, optional
+   * Creates a sub-organization ({@code name}, {@code slug} of at most 32 characters, optional
    * {@code external_id}, and a required {@code idempotency_key}; reuse the key when retrying).
-   * Returns {@code {org, env_id, created}}: {@code env_id} is the child's default environment and
+   * Returns {@code {org, env_id, created}}: {@code env_id} is the sub-organization's default environment and
    * {@code created} is false when the idempotency key matched an earlier request.
    */
   public Map<String, Object> create(Map<String, Object> body) {
@@ -45,7 +45,7 @@ public final class OrgsResource {
   }
 
   /**
-   * Changes a child organization's lifecycle: {@code {"state": "active" | "suspended" |
+   * Changes a sub-organization's lifecycle: {@code {"state": "active" | "suspended" |
    * "archived"}}. Returns the updated organization.
    */
   public Map<String, Object> update(String orgId, Map<String, Object> body) {
@@ -53,11 +53,11 @@ public final class OrgsResource {
   }
 
   /**
-   * Returns account usage for the current billing period, across the root and every child. Pass
-   * the root organization's id (the org key's own organization).
+   * Returns account usage for the current billing period, across the parent organization and every sub-organization. Pass
+   * the parent organization's id (the org key's own organization).
    */
-  public Map<String, Object> usage(String rootOrgId) {
-    return Json.dataObject(transport.requestJson("GET", org(rootOrgId) + "/usage", null, null));
+  public Map<String, Object> usage(String parentOrgId) {
+    return Json.dataObject(transport.requestJson("GET", org(parentOrgId) + "/usage", null, null));
   }
 
   /** Deletes every call trace in the organization's environments. */
@@ -66,7 +66,7 @@ public final class OrgsResource {
   }
 
   /**
-   * Deletes every call trace in the organization's environments, and in its children's with
+   * Deletes every call trace in the organization's environments, and in its sub-organizations' with
    * {@code includeSubOrgs}. Returns {@code {calls_deleted, blob_refs_released, complete}}; call
    * again while {@code complete} is false.
    */
