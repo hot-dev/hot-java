@@ -54,7 +54,7 @@ dependencies {
     testImplementation(platform("org.eclipse.jetty:jetty-bom:12.1.14"))
     testImplementation(platform("org.eclipse.jetty.ee10:jetty-ee10-bom:12.1.14"))
     constraints {
-        testImplementation("com.google.guava:guava:33.7.2-jre")
+        testImplementation("com.google.guava:guava:33.8.0-jre")
         testImplementation("org.apache.httpcomponents.client5:httpclient5:5.6.5")
         testImplementation("org.apache.httpcomponents.core5:httpcore5:5.4.4")
         testImplementation("org.apache.httpcomponents.core5:httpcore5-h2:5.4.4")
