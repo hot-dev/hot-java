@@ -51,10 +51,10 @@ dependencies {
     // WireMock's 4.3.1: 4.5 (which fixes GHSA-r4gv-qr8j-p3pg) removed helpers WireMock 3.13 loads,
     // and these tests use no response templating.
     testImplementation(enforcedPlatform("com.fasterxml.jackson:jackson-bom:2.22.4"))
-    testImplementation(platform("org.eclipse.jetty:jetty-bom:12.1.14"))
-    testImplementation(platform("org.eclipse.jetty.ee10:jetty-ee10-bom:12.1.14"))
+    testImplementation(platform("org.eclipse.jetty:jetty-bom:12.1.15"))
+    testImplementation(platform("org.eclipse.jetty.ee10:jetty-ee10-bom:12.1.15"))
     constraints {
-        testImplementation("com.google.guava:guava:33.7.2-jre")
+        testImplementation("com.google.guava:guava:33.8.0-jre")
         testImplementation("org.apache.httpcomponents.client5:httpclient5:5.6.5")
         testImplementation("org.apache.httpcomponents.core5:httpcore5:5.4.4")
         testImplementation("org.apache.httpcomponents.core5:httpcore5-h2:5.4.4")
