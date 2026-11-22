@@ -48,6 +48,12 @@ public final class Backoff {
     return error instanceof HotApiException api && api.isPermanent();
   }
 
+  /** True when the current thread was interrupted or {@code error} wraps an interrupt. */
+  public static boolean isInterrupted(RuntimeException error) {
+    return Thread.currentThread().isInterrupted()
+        || (error != null && error.getCause() instanceof InterruptedException);
+  }
+
   /**
    * Sleeps {@code delayMillis} before a reconnect. When the deadline ({@link System#nanoTime()}
    * based, or {@link Long#MAX_VALUE} for none) would pass first, throws {@link

@@ -12,7 +12,10 @@ public final class CallOptions {
 
   /** Bounds the wait for the run result (default 60 seconds). */
   public CallOptions timeout(Duration timeout) {
-    this.timeout = timeout;
+    if (timeout != null && (timeout.isZero() || timeout.isNegative())) {
+      throw new IllegalArgumentException("timeout must be positive");
+    }
+    this.timeout = timeout == null ? Duration.ofSeconds(60) : timeout;
     return this;
   }
 

@@ -10,7 +10,10 @@ public final class TaskWaitOptions {
 
   /** Bounds the whole wait, reconnects and backoff included (default 60 seconds). */
   public TaskWaitOptions timeout(Duration timeout) {
-    this.timeout = timeout;
+    if (timeout != null && (timeout.isZero() || timeout.isNegative())) {
+      throw new IllegalArgumentException("timeout must be positive");
+    }
+    this.timeout = timeout == null ? Duration.ofSeconds(60) : timeout;
     return this;
   }
 

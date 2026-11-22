@@ -1,9 +1,7 @@
 package dev.hot.sdk;
 
 import dev.hot.sdk.internal.Json;
-import dev.hot.sdk.internal.Responses;
 import dev.hot.sdk.internal.Transport;
-import java.net.http.HttpRequest.BodyPublishers;
 import java.util.Map;
 
 /** Manages projects. */
@@ -51,10 +49,7 @@ public final class ProjectsResource {
 
   /** Deletes a project. */
   public void delete(String project) {
-    Responses.closeQuietly(
-        transport.requestRaw(
-            "DELETE", projectPath(project), null, null,
-            BodyPublishers.noBody()));
+    transport.requestJson("DELETE", projectPath(project), null, null);
   }
 
   /** Activates a project. */

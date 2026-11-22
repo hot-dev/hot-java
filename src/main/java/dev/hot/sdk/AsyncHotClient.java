@@ -1,11 +1,15 @@
 package dev.hot.sdk;
 
+import java.io.InputStream;
+import java.net.http.HttpRequest.BodyPublisher;
+import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -16,28 +20,42 @@ import java.util.function.Supplier;
  * {@link HotClient} that runs each call on the configured executor; streaming methods drive the
  * event iterator on that executor and deliver events to a consumer.
  *
- * <p>Calls block a thread for the whole request or wait, so the default executor is a dedicated
- * pool of daemon threads ({@code hot-sdk-async-N}), not {@link
- * java.util.concurrent.ForkJoinPool#commonPool()}. Pass your own with {@link #wrap(HotClient,
- * Executor)}.
+ * <p>Calls block a thread for the whole request or wait, so the default executor is a bounded
+ * pool of daemon threads ({@code hot-sdk-async-N}) that scales down to zero when idle, never
+ * {@link java.util.concurrent.ForkJoinPool#commonPool()}. Pass your own with {@link
+ * #wrap(HotClient, Executor)}.
  *
- * <p>Cancelling a streaming method's future ({@code future.cancel(true)}) closes the underlying
- * subscription and stops delivering events.
+ * <p>Cancelling a streaming method's future ({@code future.cancel(true)}) interrupts any in-flight
+ * connect or reconnect sleep, closes the underlying subscription, and stops delivering events.
  */
 public final class AsyncHotClient {
 
   private static final AtomicInteger THREADS = new AtomicInteger();
 
+  static final int DEFAULT_MAX_THREADS =
+      Math.min(64, Math.max(16, Runtime.getRuntime().availableProcessors() * 4));
+
   // Lazily created: clients wrapping their own executor never start it.
   private static final class DefaultExecutor {
-    static final ExecutorService INSTANCE =
-        Executors.newCachedThreadPool(
-            runnable -> {
-              Thread thread =
-                  new Thread(runnable, "hot-sdk-async-" + THREADS.incrementAndGet());
-              thread.setDaemon(true);
-              return thread;
-            });
+    static final ThreadPoolExecutor INSTANCE = create();
+
+    private static ThreadPoolExecutor create() {
+      ThreadPoolExecutor executor =
+          new ThreadPoolExecutor(
+              DEFAULT_MAX_THREADS,
+              DEFAULT_MAX_THREADS,
+              60L,
+              TimeUnit.SECONDS,
+              new LinkedBlockingQueue<>(),
+              runnable -> {
+                Thread thread =
+                    new Thread(runnable, "hot-sdk-async-" + THREADS.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+              });
+      executor.allowCoreThreadTimeOut(true);
+      return executor;
+    }
   }
 
   private final HotClient client;
@@ -49,6 +67,7 @@ public final class AsyncHotClient {
   private final Streams streams;
   private final Tasks tasks;
   private final Files files;
+  private final Blobs blobs;
   private final Projects projects;
   private final Builds builds;
   private final Context context;
@@ -59,6 +78,12 @@ public final class AsyncHotClient {
   private final ApiKeys apiKeys;
 
   private AsyncHotClient(HotClient client, Executor executor) {
+    if (client == null) {
+      throw new IllegalArgumentException("client is required");
+    }
+    if (executor == null) {
+      throw new IllegalArgumentException("executor is required");
+    }
     this.client = client;
     this.executor = executor;
     this.events = new Events();
@@ -68,9 +93,10 @@ public final class AsyncHotClient {
     this.streams = new Streams();
     this.tasks = new Tasks();
     this.files = new Files();
-    this.projects = new Projects();
-    this.builds = new Builds();
-    this.context = new Context();
+    this.blobs = new Blobs();
+    this.projects = new Projects(client.projects());
+    this.builds = new Builds(client.builds());
+    this.context = new Context(client.context());
     this.domains = new Domains();
     this.sessions = new Sessions();
     this.serviceKeys = new ServiceKeys();
@@ -78,7 +104,7 @@ public final class AsyncHotClient {
     this.apiKeys = new ApiKeys();
   }
 
-  /** Wraps a synchronous client with the SDK's dedicated daemon thread pool. */
+  /** Wraps a synchronous client with the SDK's bounded daemon thread pool. */
   public static AsyncHotClient wrap(HotClient client) {
     return wrap(client, DefaultExecutor.INSTANCE);
   }
@@ -88,9 +114,19 @@ public final class AsyncHotClient {
     return new AsyncHotClient(client, executor);
   }
 
+  /** Package-private accessor for tests verifying default executor bounds. */
+  static ThreadPoolExecutor defaultExecutor() {
+    return DefaultExecutor.INSTANCE;
+  }
+
   /** The underlying synchronous client. */
   public HotClient sync() {
     return client;
+  }
+
+  /** Calls the public {@code GET /status} health endpoint. */
+  public CompletableFuture<Map<String, Object>> status() {
+    return supply(client::status);
   }
 
   private <T> CompletableFuture<T> supply(Supplier<T> supplier) {
@@ -103,33 +139,61 @@ public final class AsyncHotClient {
 
   /**
    * Opens a subscription and delivers its events on the executor. Cancelling the returned future
-   * closes the subscription.
+   * closes the subscription and interrupts any blocked connect or backoff sleep.
    */
   private CompletableFuture<Void> drain(
       Supplier<StreamEvents> open, Consumer<Map<String, Object>> onEvent) {
     CompletableFuture<Void> result = new CompletableFuture<>();
     AtomicReference<StreamEvents> current = new AtomicReference<>();
+    AtomicReference<Thread> worker = new AtomicReference<>();
+    Object lock = new Object();
     result.whenComplete(
         (ignored, error) -> {
-          StreamEvents source = current.get();
-          if (result.isCancelled() && source != null) {
+          if (!result.isCancelled()) {
+            return;
+          }
+          StreamEvents source;
+          synchronized (lock) {
+            source = current.get();
+            Thread thread = worker.get();
+            if (thread != null) {
+              thread.interrupt();
+            }
+          }
+          if (source != null) {
             source.close();
           }
         });
     try {
       executor.execute(
           () -> {
-            if (result.isDone()) {
-              return;
+            synchronized (lock) {
+              if (result.isDone()) {
+                return;
+              }
+              worker.set(Thread.currentThread());
             }
             try (StreamEvents source = open.get()) {
-              current.set(source);
+              boolean cancelled;
+              synchronized (lock) {
+                current.set(source);
+                cancelled = result.isCancelled();
+              }
+              if (cancelled) {
+                return;
+              }
               while (!result.isDone() && source.hasNext()) {
                 onEvent.accept(source.next());
               }
               result.complete(null);
             } catch (Throwable error) {
               result.completeExceptionally(error);
+            } finally {
+              synchronized (lock) {
+                worker.set(null);
+              }
+              // Clear any interrupt flag raised by cancellation before returning thread to pool.
+              Thread.interrupted();
             }
           });
     } catch (RuntimeException rejected) {
@@ -164,6 +228,11 @@ public final class AsyncHotClient {
 
   public Files files() {
     return files;
+  }
+
+  /** Large payloads spilled to blob storage (environment API keys only). */
+  public Blobs blobs() {
+    return blobs;
   }
 
   public Projects projects() {
@@ -202,6 +271,16 @@ public final class AsyncHotClient {
   public CompletableFuture<Map<String, Object>> request(
       String method, String path, Object body, Map<String, String> query) {
     return supply(() -> client.request(method, path, body, query));
+  }
+
+  /** Async escape hatch mirroring {@link HotClient#requestRaw}. */
+  public CompletableFuture<HttpResponse<InputStream>> requestRaw(
+      String method,
+      String path,
+      Map<String, String> query,
+      Map<String, String> headers,
+      BodyPublisher body) {
+    return supply(() -> client.requestRaw(method, path, query, headers, body));
   }
 
   /** Async view of {@link EventsResource}. */
@@ -296,6 +375,12 @@ public final class AsyncHotClient {
       return drain(() -> client.streams().subscribe(streamId, project), onEvent);
     }
 
+    /** Streams events via POST to {@code onEvent} until the subscription ends. */
+    public CompletableFuture<Void> subscribePost(
+        String streamId, String project, Consumer<Map<String, Object>> onEvent) {
+      return drain(() -> client.streams().subscribePost(streamId, project), onEvent);
+    }
+
     public CompletableFuture<Map<String, Object>> purgeCalls(String streamId) {
       return supply(() -> client.streams().purgeCalls(streamId));
     }
@@ -357,6 +442,11 @@ public final class AsyncHotClient {
       return run(() -> client.files().delete(fileId));
     }
 
+    /** Returns the raw HTTP response streaming the file content. Caller must close the stream. */
+    public CompletableFuture<HttpResponse<InputStream>> download(String fileId) {
+      return supply(() -> client.files().download(fileId));
+    }
+
     public CompletableFuture<Map<String, Object>> upload(
         String path, byte[] content, String contentType) {
       return supply(() -> client.files().upload(path, content, contentType));
@@ -380,94 +470,125 @@ public final class AsyncHotClient {
     }
   }
 
+  /** Async view of {@link BlobsResource}. */
+  public final class Blobs {
+    /** Returns the raw HTTP response streaming the blob bytes. Caller must close the stream. */
+    public CompletableFuture<HttpResponse<InputStream>> download(String blobRefId) {
+      return supply(() -> client.blobs().download(blobRefId));
+    }
+  }
+
   /** Async view of {@link ProjectsResource}. */
   public final class Projects {
+    private final ProjectsResource resource;
+
+    private Projects(ProjectsResource resource) {
+      this.resource = resource;
+    }
+
     public CompletableFuture<Map<String, Object>> list(Map<String, String> query) {
-      return supply(() -> client.projects().list(query));
+      return supply(() -> resource.list(query));
     }
 
     public CompletableFuture<Map<String, Object>> create(Map<String, Object> body) {
-      return supply(() -> client.projects().create(body));
+      return supply(() -> resource.create(body));
     }
 
     public CompletableFuture<Map<String, Object>> get(String project) {
-      return supply(() -> client.projects().get(project));
+      return supply(() -> resource.get(project));
     }
 
     public CompletableFuture<Map<String, Object>> update(String project, Map<String, Object> body) {
-      return supply(() -> client.projects().update(project, body));
+      return supply(() -> resource.update(project, body));
     }
 
     public CompletableFuture<Void> delete(String project) {
-      return run(() -> client.projects().delete(project));
+      return run(() -> resource.delete(project));
     }
 
     public CompletableFuture<Map<String, Object>> activate(String project) {
-      return supply(() -> client.projects().activate(project));
+      return supply(() -> resource.activate(project));
     }
 
     public CompletableFuture<Map<String, Object>> deactivate(String project) {
-      return supply(() -> client.projects().deactivate(project));
+      return supply(() -> resource.deactivate(project));
     }
 
     public CompletableFuture<Map<String, Object>> eventHandlers(String project) {
-      return supply(() -> client.projects().eventHandlers(project));
+      return supply(() -> resource.eventHandlers(project));
     }
 
     public CompletableFuture<Map<String, Object>> schedules(String project) {
-      return supply(() -> client.projects().schedules(project));
+      return supply(() -> resource.schedules(project));
     }
   }
 
   /** Async view of {@link BuildsResource}. */
   public final class Builds {
+    private final BuildsResource resource;
+
+    private Builds(BuildsResource resource) {
+      this.resource = resource;
+    }
+
     public CompletableFuture<Map<String, Object>> list(Map<String, String> query) {
-      return supply(() -> client.builds().list(query));
+      return supply(() -> resource.list(query));
     }
 
     public CompletableFuture<Map<String, Object>> listForProject(
         String project, Map<String, String> query) {
-      return supply(() -> client.builds().listForProject(project, query));
+      return supply(() -> resource.listForProject(project, query));
     }
 
     public CompletableFuture<Map<String, Object>> get(String project, String buildId) {
-      return supply(() -> client.builds().get(project, buildId));
+      return supply(() -> resource.get(project, buildId));
     }
 
     public CompletableFuture<Map<String, Object>> deployed(String project) {
-      return supply(() -> client.builds().deployed(project));
+      return supply(() -> resource.deployed(project));
     }
 
     public CompletableFuture<Map<String, Object>> live(String project) {
-      return supply(() -> client.builds().live(project));
+      return supply(() -> resource.live(project));
     }
 
     public CompletableFuture<Map<String, Object>> upload(String project, BuildUpload upload) {
-      return supply(() -> client.builds().upload(project, upload));
+      return supply(() -> resource.upload(project, upload));
+    }
+
+    /** Returns the raw HTTP response streaming the build archive. Caller must close the stream. */
+    public CompletableFuture<HttpResponse<InputStream>> download(String project, String buildId) {
+      return supply(() -> resource.download(project, buildId));
     }
 
     public CompletableFuture<Map<String, Object>> deploy(String project, String buildId) {
-      return supply(() -> client.builds().deploy(project, buildId));
+      return supply(() -> resource.deploy(project, buildId));
     }
   }
 
   /** Async view of {@link ContextResource}. */
   public final class Context {
+    private final ContextResource resource;
+
+    private Context(ContextResource resource) {
+      this.resource = resource;
+    }
+
     public CompletableFuture<Map<String, Object>> list(String project) {
-      return supply(() -> client.context().list(project));
+      return supply(() -> resource.list(project));
     }
 
     public CompletableFuture<Map<String, Object>> create(String project, Map<String, Object> body) {
-      return supply(() -> client.context().create(project, body));
+      return supply(() -> resource.create(project, body));
     }
 
     public CompletableFuture<Map<String, Object>> update(
         String project, String key, Map<String, Object> body) {
-      return supply(() -> client.context().update(project, key, body));
+      return supply(() -> resource.update(project, key, body));
     }
 
     public CompletableFuture<Void> delete(String project, String key) {
-      return run(() -> client.context().delete(project, key));
+      return run(() -> resource.delete(project, key));
     }
   }
 
@@ -610,34 +731,119 @@ public final class AsyncHotClient {
   /** Async view of {@link dev.hot.sdk.OrgEnv}. */
   public final class OrgEnv {
     private final dev.hot.sdk.OrgEnv env;
+    private final Projects projects;
+    private final Builds builds;
+    private final Context context;
 
     private OrgEnv(dev.hot.sdk.OrgEnv env) {
       this.env = env;
+      this.projects = new Projects(env.projects());
+      this.builds = new Builds(env.builds());
+      this.context = new Context(env.context());
+    }
+
+    /** Async projects resource scoped to this environment. */
+    public Projects projects() {
+      return projects;
+    }
+
+    /** Async builds resource scoped to this environment. */
+    public Builds builds() {
+      return builds;
+    }
+
+    /** Async context resource scoped to this environment. */
+    public Context context() {
+      return context;
     }
 
     public CompletableFuture<Map<String, Object>> listProjects(Map<String, String> query) {
-      return supply(() -> env.projects().list(query));
+      return projects.list(query);
     }
 
     public CompletableFuture<Map<String, Object>> createProject(Map<String, Object> body) {
-      return supply(() -> env.projects().create(body));
+      return projects.create(body);
     }
 
     public CompletableFuture<Map<String, Object>> getProject(String project) {
-      return supply(() -> env.projects().get(project));
+      return projects.get(project);
+    }
+
+    public CompletableFuture<Map<String, Object>> updateProject(
+        String project, Map<String, Object> body) {
+      return projects.update(project, body);
+    }
+
+    public CompletableFuture<Void> deleteProject(String project) {
+      return projects.delete(project);
+    }
+
+    public CompletableFuture<Map<String, Object>> activateProject(String project) {
+      return projects.activate(project);
+    }
+
+    public CompletableFuture<Map<String, Object>> deactivateProject(String project) {
+      return projects.deactivate(project);
+    }
+
+    public CompletableFuture<Map<String, Object>> projectEventHandlers(String project) {
+      return projects.eventHandlers(project);
+    }
+
+    public CompletableFuture<Map<String, Object>> projectSchedules(String project) {
+      return projects.schedules(project);
+    }
+
+    public CompletableFuture<Map<String, Object>> listBuilds(Map<String, String> query) {
+      return builds.list(query);
+    }
+
+    public CompletableFuture<Map<String, Object>> listProjectBuilds(
+        String project, Map<String, String> query) {
+      return builds.listForProject(project, query);
+    }
+
+    public CompletableFuture<Map<String, Object>> getBuild(String project, String buildId) {
+      return builds.get(project, buildId);
+    }
+
+    public CompletableFuture<Map<String, Object>> deployedBuild(String project) {
+      return builds.deployed(project);
+    }
+
+    public CompletableFuture<Map<String, Object>> liveBuild(String project) {
+      return builds.live(project);
     }
 
     public CompletableFuture<Map<String, Object>> uploadBuild(String project, BuildUpload upload) {
-      return supply(() -> env.builds().upload(project, upload));
+      return builds.upload(project, upload);
+    }
+
+    public CompletableFuture<HttpResponse<InputStream>> downloadBuild(
+        String project, String buildId) {
+      return builds.download(project, buildId);
     }
 
     public CompletableFuture<Map<String, Object>> deployBuild(String project, String buildId) {
-      return supply(() -> env.builds().deploy(project, buildId));
+      return builds.deploy(project, buildId);
+    }
+
+    public CompletableFuture<Map<String, Object>> listContext(String project) {
+      return context.list(project);
     }
 
     public CompletableFuture<Map<String, Object>> createContext(
         String project, Map<String, Object> body) {
-      return supply(() -> env.context().create(project, body));
+      return context.create(project, body);
+    }
+
+    public CompletableFuture<Map<String, Object>> updateContext(
+        String project, String key, Map<String, Object> body) {
+      return context.update(project, key, body);
+    }
+
+    public CompletableFuture<Void> deleteContext(String project, String key) {
+      return context.delete(project, key);
     }
 
     /** The synchronous resources, for calls without an async helper here. */

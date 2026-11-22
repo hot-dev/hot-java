@@ -1,9 +1,7 @@
 package dev.hot.sdk;
 
 import dev.hot.sdk.internal.Json;
-import dev.hot.sdk.internal.Responses;
 import dev.hot.sdk.internal.Transport;
-import java.net.http.HttpRequest.BodyPublishers;
 import java.util.Map;
 
 /** Manages custom domains. */
@@ -33,10 +31,7 @@ public final class DomainsResource {
 
   /** Deletes a domain. */
   public void delete(String domainId) {
-    Responses.closeQuietly(
-        transport.requestRaw(
-            "DELETE", "/domains/" + Transport.enc(domainId), null, null,
-            BodyPublishers.noBody()));
+    transport.requestJson("DELETE", "/domains/" + Transport.enc(domainId), null, null);
   }
 
   /** Triggers domain verification. */

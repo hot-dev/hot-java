@@ -29,4 +29,13 @@ public interface StreamEvents extends Iterator<Map<String, Object>>, AutoCloseab
     Map<String, Object> run = runOf(event);
     return run != null && run.get("run_id") instanceof String runId ? runId : null;
   }
+
+  /** The "retry_run_id" field of a run:fail event, or null when absent. */
+  static String retryRunIdOf(Map<String, Object> event) {
+    return event != null
+            && event.get("retry_run_id") instanceof String retryRunId
+            && !retryRunId.isEmpty()
+        ? retryRunId
+        : null;
+  }
 }

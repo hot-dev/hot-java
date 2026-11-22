@@ -58,8 +58,14 @@ public final class StreamsResource {
    * result message; a failure that is being retried instead waits for the retry run.
    */
   public Map<String, Object> waitForRunResult(String streamId, String eventId, WaitOptions options) {
+    WaitOptions effective = options != null ? options : new WaitOptions();
     return RunWaiter.waitForRunResult(
-        transport, streamId, eventId, options.timeout(), options.onChunk(), options.maxAttempts());
+        transport,
+        streamId,
+        eventId,
+        effective.timeout(),
+        effective.onChunk(),
+        effective.maxAttempts());
   }
 
   /** Atomically subscribes then publishes an event, with default options. */
@@ -82,11 +88,13 @@ public final class StreamsResource {
    */
   public StreamEvents subscribeWithEvent(
       Map<String, Object> body, SubscribeWithEventOptions options) {
-    if (!options.reconnectEnabled()) {
+    SubscribeWithEventOptions effective =
+        options != null ? options : new SubscribeWithEventOptions();
+    if (!effective.reconnectEnabled()) {
       return transport.stream(
-          "POST", "/streams/subscribe-with-event", body, projectQuery(options.project()));
+          "POST", "/streams/subscribe-with-event", body, projectQuery(effective.project()));
     }
-    return new ReconnectingEvents(transport, body, options);
+    return new ReconnectingEvents(transport, body, effective);
   }
 
   private static Map<String, String> projectQuery(String project) {

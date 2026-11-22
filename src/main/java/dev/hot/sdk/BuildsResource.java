@@ -73,6 +73,9 @@ public final class BuildsResource {
 
   /** Uploads a build archive as multipart form data. */
   public Map<String, Object> upload(String project, BuildUpload upload) {
+    if (upload == null) {
+      throw new IllegalArgumentException("upload is required");
+    }
     Map<String, String> fields = new LinkedHashMap<>();
     fields.put("hash", upload.hash());
     if (upload.buildId() != null) {

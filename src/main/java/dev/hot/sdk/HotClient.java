@@ -39,7 +39,7 @@ import java.util.Map;
  * Org API keys call only {@link #orgs()} and {@link #apiKeys()}. Calling the other kind's routes
  * throws {@link HotKeyScopeException}; use one client per credential.
  */
-public final class HotClient {
+public final class HotClient implements AutoCloseable {
 
   private final Transport transport;
   private final EventsResource events;
@@ -87,6 +87,24 @@ public final class HotClient {
   /** The configured base URL without the /v1 suffix. */
   public String baseUrl() {
     return transport.baseUrl();
+  }
+
+  /**
+   * Calls the public {@code GET /status} health endpoint on the server root (without sending an
+   * {@code Authorization} header) and returns the parsed JSON object.
+   */
+  public Map<String, Object> status() {
+    return transport.status();
+  }
+
+  /**
+   * Releases client resources. The default {@link HttpClient} is shared across default {@code
+   * HotClient} instances, and injected {@link HttpClient} instances remain owned by the caller, so
+   * closing a {@code HotClient} is a safe no-op that supports try-with-resources.
+   */
+  @Override
+  public void close() {
+    // Shared default HttpClient and caller-owned HttpClients are managed externally.
   }
 
   public EventsResource events() {
@@ -197,27 +215,37 @@ public final class HotClient {
 
     /**
      * Overrides the base URL (default {@code https://api.hot.dev}). For local development with
-     * {@code hot dev}, use {@code http://localhost:4681}.
+     * {@code hot dev}, use {@code http://localhost:4681}. Passing {@code null} restores the
+     * default base URL.
      */
     public Builder baseUrl(String baseUrl) {
-      this.baseUrl = baseUrl;
+      this.baseUrl = baseUrl == null ? Transport.DEFAULT_BASE_URL : baseUrl;
       return this;
     }
 
     /**
-     * Bounds each JSON request (default 60 seconds). Not applied to streaming or raw requests;
-     * waiters take their own timeout.
+     * Bounds each JSON request (default 60 seconds). Must be positive when non-null. Not applied
+     * to streaming or raw requests; waiters take their own timeout.
      */
     public Builder timeout(Duration timeout) {
+      if (timeout != null && (timeout.isZero() || timeout.isNegative())) {
+        throw new IllegalArgumentException("timeout must be positive");
+      }
       this.timeout = timeout;
       return this;
     }
 
     /**
      * Overrides the underlying {@link HttpClient}, e.g. to configure proxies or executors. The
-     * default client has a 10-second connect timeout.
+     * default client is shared lazily across default {@code HotClient} instances and uses a
+     * 10-second connect timeout with {@link HttpClient.Redirect#NEVER}. Injected clients must keep
+     * {@link HttpClient.Redirect#NEVER} so bearer tokens are never forwarded across redirects.
      */
     public Builder httpClient(HttpClient httpClient) {
+      if (httpClient != null && httpClient.followRedirects() != HttpClient.Redirect.NEVER) {
+        throw new IllegalArgumentException(
+            "httpClient must use Redirect.NEVER to avoid forwarding Authorization headers");
+      }
       this.httpClient = httpClient;
       return this;
     }

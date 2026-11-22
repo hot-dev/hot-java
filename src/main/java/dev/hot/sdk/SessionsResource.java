@@ -1,9 +1,7 @@
 package dev.hot.sdk;
 
 import dev.hot.sdk.internal.Json;
-import dev.hot.sdk.internal.Responses;
 import dev.hot.sdk.internal.Transport;
-import java.net.http.HttpRequest.BodyPublishers;
 import java.util.Map;
 
 /** Creates and revokes scoped sessions. */
@@ -32,10 +30,7 @@ public final class SessionsResource {
 
   /** Revokes one session. */
   public void revoke(String sessionId) {
-    Responses.closeQuietly(
-        transport.requestRaw(
-            "DELETE", "/sessions/" + Transport.enc(sessionId), null, null,
-            BodyPublishers.noBody()));
+    transport.requestJson("DELETE", "/sessions/" + Transport.enc(sessionId), null, null);
   }
 
   /** Revokes every session. */

@@ -9,13 +9,13 @@ import dev.hot.sdk.StreamEvents;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -32,13 +32,23 @@ public final class RunWaiter {
   // A daemon watchdog closes the stream at the deadline so a silent stream
   // cannot block past the timeout; the per-event check below handles streams
   // that keep trickling events.
-  private static final ScheduledExecutorService WATCHDOG =
-      Executors.newSingleThreadScheduledExecutor(
-          runnable -> {
-            Thread thread = new Thread(runnable, "hot-sdk-wait-watchdog");
-            thread.setDaemon(true);
-            return thread;
-          });
+  static final ScheduledThreadPoolExecutor WATCHDOG = newWatchdog();
+
+  private static ScheduledThreadPoolExecutor newWatchdog() {
+    ScheduledThreadPoolExecutor executor =
+        new ScheduledThreadPoolExecutor(
+            1,
+            runnable -> {
+              Thread thread = new Thread(runnable, "hot-sdk-wait-watchdog");
+              thread.setDaemon(true);
+              return thread;
+            });
+    executor.setRemoveOnCancelPolicy(true);
+    return executor;
+  }
+
+  /** Bounds memory for seen run event keys on busy shared streams. */
+  static final int MAX_SEEN = 10_000;
 
   /** No line (keepalives arrive every 15 s) for this long means a dead connection. */
   public static final Duration IDLE_TIMEOUT = Duration.ofSeconds(45);
@@ -308,6 +318,9 @@ public final class RunWaiter {
       Connection<T> connection) {
     int failures = 0;
     while (true) {
+      if (Thread.currentThread().isInterrupted()) {
+        throw new HotTransportException(new InterruptedException("wait interrupted"));
+      }
       long remaining = deadline - System.nanoTime();
       if (remaining <= 0) {
         connection.beforeTimeout();
@@ -333,7 +346,7 @@ public final class RunWaiter {
         connection.beforeTimeout();
         throw error;
       } catch (RuntimeException error) {
-        if (Backoff.isPermanent(error)) {
+        if (Backoff.isPermanent(error) || Backoff.isInterrupted(error)) {
           throw error;
         }
         failure = error;
@@ -420,7 +433,10 @@ public final class RunWaiter {
         if (state.seen.add(type + " " + runId)) {
           progress.delivered = true;
         }
-        Map<String, Object> result = settle(correlation.runEvent(type, StreamEvents.runOf(event)));
+        Map<String, Object> result =
+            settle(
+                correlation.runEvent(
+                    type, StreamEvents.runOf(event), StreamEvents.retryRunIdOf(event)));
         if (result != null) {
           return result;
         }
@@ -428,7 +444,7 @@ public final class RunWaiter {
       }
     } catch (HotTransportException closed) {
       // The grace watchdog closed the stream: the held failure stands.
-      if (!correlation.graceOver()) {
+      if (!correlation.graceOver() || Backoff.isInterrupted(closed)) {
         throw closed;
       }
     } finally {
@@ -486,7 +502,11 @@ public final class RunWaiter {
   }
 
   private static long deadline(Duration timeout) {
-    return System.nanoTime() + timeout.toNanos();
+    Duration effective = timeout != null ? timeout : Transport.DEFAULT_TIMEOUT;
+    if (effective.isZero() || effective.isNegative()) {
+      throw new IllegalArgumentException("timeout must be positive");
+    }
+    return System.nanoTime() + effective.toNanos();
   }
 
   private static ScheduledFuture<?> scheduleClose(StreamEvents events, long deadline) {
@@ -494,8 +514,22 @@ public final class RunWaiter {
     return WATCHDOG.schedule(events::close, remaining, TimeUnit.NANOSECONDS);
   }
 
-  private static boolean expired(long deadline) {
-    return System.nanoTime() >= deadline;
+  static boolean expired(long deadline) {
+    return expired(System.nanoTime(), deadline);
+  }
+
+  static boolean expired(long now, long deadline) {
+    return now - deadline >= 0;
+  }
+
+  static Set<String> boundedSet(int maxSize) {
+    return Collections.newSetFromMap(
+        new LinkedHashMap<>(Math.min(maxSize, 256), 0.75f, false) {
+          @Override
+          protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+            return size() > maxSize;
+          }
+        });
   }
 
   @SuppressWarnings("unchecked")
@@ -506,7 +540,7 @@ public final class RunWaiter {
   private static final class RunState {
     private String streamId;
     private final RunCorrelation correlation;
-    private final Set<String> seen = new HashSet<>();
+    private final Set<String> seen = boundedSet(MAX_SEEN);
 
     private RunState(String eventId, Consumer<String> onChunk) {
       this.correlation = new RunCorrelation(eventId, onChunk);

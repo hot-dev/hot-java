@@ -54,7 +54,8 @@ public final class RunsResource {
 
   /** Waits until a run is terminal, reconnecting according to {@code options}. */
   public Map<String, Object> waitFor(String runId, RunWaitOptions options) {
+    RunWaitOptions effective = options != null ? options : new RunWaitOptions();
     return RunWaiter.waitForRun(
-        transport, runId, options.timeout(), options.maxAttempts());
+        transport, runId, effective.timeout(), effective.maxAttempts());
   }
 }

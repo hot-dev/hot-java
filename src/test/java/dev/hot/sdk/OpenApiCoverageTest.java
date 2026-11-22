@@ -51,7 +51,7 @@ class OpenApiCoverageTest {
     coverage.put("DELETE /v1/env/calls", "env.purgeCalls");
     coverage.put("DELETE /v1/runs/{run_id}/calls", "runs.purgeCalls");
     coverage.put("DELETE /v1/streams/{stream_id}/calls", "streams.purgeCalls");
-    coverage.put("GET /status", ""); // public health endpoint
+    coverage.put("GET /status", "status");
     coverage.put("GET /v1/projects", "projects.list");
     coverage.put("POST /v1/projects", "projects.create");
     coverage.put("GET /v1/projects/{project_id_or_slug}", "projects.get");
@@ -139,23 +139,27 @@ class OpenApiCoverageTest {
     HotClient client = HotClient.builder("test-token").build();
 
     for (Map.Entry<String, String> entry : COVERAGE.entrySet()) {
-      if (entry.getValue().isEmpty()) {
-        continue;
-      }
+      assertTrue(!entry.getValue().isEmpty(), "unmapped operation: " + entry.getKey());
       String[] parts = entry.getValue().split("\\.");
-      Object resource;
-      if (parts[0].equals("orgEnv")) {
-        resource = client.orgs().env("org", "env");
+      Object target;
+      int start;
+      if (parts.length == 1) {
+        target = client;
+        start = 0;
+      } else if (parts[0].equals("orgEnv")) {
+        target = client.orgs().env("org", "env");
+        start = 1;
       } else {
         Method accessor = HotClient.class.getMethod(parts[0]);
-        resource = accessor.invoke(client);
+        target = accessor.invoke(client);
+        start = 1;
       }
-      for (int i = 1; i < parts.length - 1; i++) {
-        resource = resource.getClass().getMethod(parts[i]).invoke(resource);
+      for (int i = start; i < parts.length - 1; i++) {
+        target = target.getClass().getMethod(parts[i]).invoke(target);
       }
       String name = parts[parts.length - 1];
       boolean exists =
-          Arrays.stream(resource.getClass().getMethods())
+          Arrays.stream(target.getClass().getMethods())
               .anyMatch(method -> method.getName().equals(name));
       assertTrue(exists, entry.getKey() + " -> client." + entry.getValue());
     }
