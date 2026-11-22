@@ -34,7 +34,19 @@ public final class HotKeyScopeException extends HotApiException {
 
   static String requiredScope(String path, String message) {
     if (path != null) {
-      return path.startsWith("/orgs") || path.startsWith("/api-keys") ? "org" : "env";
+      String normalized = path;
+      while (normalized.startsWith("/")) {
+        normalized = normalized.substring(1);
+      }
+      if (normalized.equals("v1") || normalized.startsWith("v1/")) {
+        normalized = normalized.length() > 3 ? normalized.substring(3) : "";
+      }
+      boolean isOrgRoute =
+          normalized.equals("orgs")
+              || normalized.startsWith("orgs/")
+              || normalized.equals("api-keys")
+              || normalized.startsWith("api-keys/");
+      return isOrgRoute ? "org" : "env";
     }
     return message != null && message.contains("needs an org API key") ? "org" : "env";
   }

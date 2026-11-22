@@ -76,11 +76,12 @@ Map<String, Object> run = client.runs().waitFor(
 ## Async Usage
 
 `AsyncHotClient` wraps a `HotClient` and returns `CompletableFuture`s. Calls
-block a thread while they wait, so they run on a dedicated pool of daemon
-threads (`hot-sdk-async-N`) by default, not the common pool; pass your own with
-`AsyncHotClient.wrap(client, executor)`. Streaming methods deliver events to a
-consumer, and cancelling their future (`future.cancel(true)`) closes the
-subscription:
+block a thread while they wait, so they run on a bounded pool of daemon
+threads (`hot-sdk-async-N`, scaling down to zero when idle) by default, not the
+common pool; pass your own with `AsyncHotClient.wrap(client, executor)`.
+Streaming methods deliver events to a consumer, and cancelling their future
+(`future.cancel(true)`) interrupts any in-flight connect or backoff sleep and
+closes the subscription:
 
 ```java
 import dev.hot.sdk.AsyncHotClient;
@@ -130,9 +131,12 @@ Transport failures throw `HotTransportException`; run failures from
 
 ### Retries and reconnects
 
-JSON requests are retried automatically (at most twice) when the API responds
-429 with a `retry_after`, and GET, PUT and DELETE requests also on 502, 503 and
-504; other errors are thrown as-is. Raw requests are never retried.
+JSON requests are retried automatically (at most twice, bounded by the client's
+`timeout`) when the API responds 429 with a `Retry-After` / `retry_after`
+(with jitter), when `POST` receives `503 event_publish_in_progress` (for
+idempotent `event_id` publishes), and on `GET`, `PUT`, `DELETE`, `HEAD` and
+`OPTIONS` requests for 502, 503 and 504; other errors (including `409
+event_id_conflict`) are thrown as-is. Raw requests are never retried.
 
 Durable waiters (`runs().waitFor`, `tasks().waitFor`, `waitForRunResult`,
 `callHot`) and `subscribeWithEvent` reconnect across transport errors, 408, 429
@@ -149,12 +153,13 @@ nothing for 45 seconds (the API sends a keepalive every 15 s) are treated as
 dead and reconnected.
 
 A handler with `retry` options reports a failed attempt with status
-`pending_retry`. Waiters and `subscribeWithEvent` keep going and return the
-retry run, which the API links to the first attempt by `origin_run_id`. Replays
-of a retried attempt can also arrive as `run:fail` with status `failed` before
-the retry run exists; such a failure (its `retry_attempt` shows a retry was
-scheduled) is reported only if no retry run appears within 5 seconds, or by the
-waiter's deadline.
+`pending_retry` (and `retry_run_id` once the retry has started — readable via
+`StreamEvents.retryRunIdOf(event)`). Waiters and `subscribeWithEvent` keep
+going and correlate the retry run immediately via `retry_run_id` or
+`origin_run_id`. Replays of a retried attempt can also arrive as `run:fail` with
+status `failed` before the retry run exists; such a failure (its `retry_attempt`
+shows a retry was scheduled) is reported only if no retry run appears within 5
+seconds, or by the waiter's deadline.
 
 ### Decimal values
 
@@ -170,11 +175,13 @@ BigDecimal total = (BigDecimal) client.events().callHot("::billing/total", List.
 
 ## Resources
 
-`HotClient` mirrors the Hot API v1 resources:
+`HotClient` mirrors the Hot API v1 resources (plus the unauthenticated root
+health check):
 
-- `client.events()` — publish, list, get, inspect event runs, and call Hot functions with `callHot(fn, args, options)`
+- `client.status()` — call the public `GET /status` health endpoint (sends no `Authorization` header; returns the unwrapped JSON map)
+- `client.events()` — publish (including client-supplied `event_id` for idempotent publishing), list, get, inspect event runs, and call Hot functions with `callHot(fn, args, options)`
 - `client.streams()` — subscribe to run and task updates, wait for run results, and publish events atomically (reconnects automatically across the 5-minute SSE timeout; use `.reconnect(false)` to opt out)
-- `client.runs()` — list, inspect, subscribe to, and wait for durable runs
+- `client.runs()` — list (supporting `limit`, `offset`, `status`, `type`, `time_range`, `project_id`, `stream_id`, and `function` query filters), inspect, subscribe to, and wait for durable runs
 - `client.tasks()` — get, subscribe to, and wait for durable background tasks
 - `client.files()` — upload, download, list, and delete files (including multipart uploads)
 - `client.blobs()` — download large payloads spilled to blob storage by `blob_ref_id` (environment API keys only)
@@ -187,10 +194,30 @@ BigDecimal total = (BigDecimal) client.events().callHot("::billing/total", List.
 - `client.org()` — view usage and limits
 - `client.env()` — read environment info, subscribe to environment events, and purge call traces
 - `client.orgs()` — org API: sub-organizations, environments, and org and environment API keys (org API keys only)
-- `client.apiKeys()` — read, narrow, rotate, and revoke API keys by id (org API keys only)
+- `client.apiKeys()` — read, narrow, rotate, and revoke API keys by id (org API keys only; `status` is one of `active`, `revoked`, `disabled`, `expired`, `issuer_inactive`, or `suspended`)
 
 Use `client.request(...)` or `client.requestRaw(...)` as an escape hatch for
-API endpoints that do not yet have a resource helper.
+API endpoints that do not yet have a resource helper. `AsyncHotClient` mirrors
+every resource (including `status()`, `blobs()`, `files().download(...)`,
+`builds().download(...)`, `streams().subscribePost(...)`, `requestRaw(...)`,
+and `orgs().env(...).projects()` / `.builds()` / `.context()`).
+
+### Idempotent event publishing
+
+Supply a caller-generated `event_id` on `events().publish(...)` to make event
+publishing idempotent across retries:
+
+```java
+Map<String, Object> published = client.events().publish(Map.of(
+    "event_id", "evt_order_12345",
+    "event_type", "order:placed",
+    "event_data", Map.of("order_id", "12345")));
+```
+
+If an earlier publish with the same `event_id` is still being processed, the API
+returns `503 event_publish_in_progress`, which the SDK retries automatically
+(honoring `Retry-After` / `retry_after`). Reusing an `event_id` with a different
+payload returns `409 event_id_conflict` as a `HotApiException`.
 
 `client.env().subscribe()` requires API key credentials and a live API pub/sub
 backend; local API servers without pub/sub return a 503.
@@ -273,7 +300,11 @@ suspension and resumption.
 
 ## Customizing the HTTP Client
 
-Pass your own `java.net.http.HttpClient` for proxies or executors:
+`HotClient` implements `AutoCloseable` for try-with-resources convenience.
+Default clients share a single lazy `java.net.http.HttpClient` with a 10-second
+connect timeout and `Redirect.NEVER`, so constructing per-sub-organization
+clients does not leak threads or sockets. Pass your own `HttpClient` for custom
+proxies, TLS settings, or executors:
 
 ```java
 HotClient client = HotClient.builder(token)
@@ -281,7 +312,8 @@ HotClient client = HotClient.builder(token)
     .build();
 ```
 
-The default `HttpClient` has a 10-second connect timeout. Use the builder's
+Injected clients must keep `HttpClient.Redirect.NEVER` (the JDK default) so
+bearer credentials are never forwarded across redirects. Use the builder's
 `timeout` (default 60 seconds) for JSON requests. Do not configure a
 client-wide request timeout for SSE subscriptions — it would sever long-lived
 streams.

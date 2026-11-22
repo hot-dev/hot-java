@@ -32,7 +32,8 @@ public final class TasksResource {
 
   /** Waits for successful completion and returns the final durable snapshot. */
   public Map<String, Object> waitFor(String taskId, TaskWaitOptions options) {
+    TaskWaitOptions effective = options != null ? options : new TaskWaitOptions();
     return RunWaiter.waitForTask(
-        transport, taskId, options.timeout(), options.maxAttempts());
+        transport, taskId, effective.timeout(), effective.maxAttempts());
   }
 }

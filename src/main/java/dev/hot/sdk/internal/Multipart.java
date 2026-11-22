@@ -24,16 +24,18 @@ public final class Multipart {
         write(out, "--" + boundary + "\r\n");
         write(
             out,
-            "Content-Disposition: form-data; name=\"" + field.getKey() + "\"\r\n\r\n");
-        write(out, field.getValue() + "\r\n");
+            "Content-Disposition: form-data; name=\""
+                + sanitizeParam(field.getKey())
+                + "\"\r\n\r\n");
+        write(out, (field.getValue() == null ? "" : field.getValue()) + "\r\n");
       }
       write(out, "--" + boundary + "\r\n");
       write(
           out,
           "Content-Disposition: form-data; name=\""
-              + fileField
+              + sanitizeParam(fileField)
               + "\"; filename=\""
-              + filename.replace("\"", "%22")
+              + sanitizeParam(filename)
               + "\"\r\n");
       write(out, "Content-Type: application/octet-stream\r\n\r\n");
       out.write(content);
@@ -42,6 +44,13 @@ public final class Multipart {
       throw new UncheckedIOException(error);
     }
     return new Encoded("multipart/form-data; boundary=" + boundary, out.toByteArray());
+  }
+
+  private static String sanitizeParam(String value) {
+    if (value == null) {
+      return "";
+    }
+    return value.replace("\r", "").replace("\n", "").replace("\"", "%22");
   }
 
   private static void write(ByteArrayOutputStream out, String text) throws IOException {

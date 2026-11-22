@@ -9,16 +9,25 @@ public final class BuildUpload {
   private String buildId;
 
   /**
-   * @param content the build archive content
-   * @param hash the build content hash
+   * @param content the build archive content (non-null)
+   * @param hash the build content hash (non-null, non-empty)
    */
   public BuildUpload(byte[] content, String hash) {
+    if (content == null) {
+      throw new IllegalArgumentException("content is required");
+    }
+    if (hash == null || hash.isEmpty()) {
+      throw new IllegalArgumentException("hash is required");
+    }
     this.content = content;
     this.hash = hash;
   }
 
-  /** Names the multipart file part (default "build"). */
+  /** Names the multipart file part (default "build"; must be non-null and non-empty). */
   public BuildUpload filename(String filename) {
+    if (filename == null || filename.isEmpty()) {
+      throw new IllegalArgumentException("filename is required");
+    }
     this.filename = filename;
     return this;
   }

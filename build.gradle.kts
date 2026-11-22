@@ -28,18 +28,18 @@ tasks.jar {
     manifest {
         attributes["Implementation-Title"] = "hot-sdk"
         attributes["Implementation-Version"] = version
+        attributes["Automatic-Module-Name"] = "dev.hot.sdk"
     }
 }
 
 tasks.withType<Javadoc>().configureEach {
-    (options as StandardJavadocDocletOptions).addStringOption("Xdoclint:none", "-quiet")
+    (options as StandardJavadocDocletOptions).addStringOption("Xdoclint:all,-missing", "-quiet")
 }
 
 dependencies {
-    // The BOM aligns jackson-core and jackson-annotations with databind. The published POM
-    // carries the resolved 2.18.12 versions (see versionMapping below).
-    implementation(platform("com.fasterxml.jackson:jackson-bom:2.23.0"))
-    implementation("com.fasterxml.jackson.core:jackson-databind")
+    // Direct runtime dependency (no exported jackson-bom platform forcing downstream apps'
+    // other Jackson modules).
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.23.0")
 
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
@@ -79,8 +79,7 @@ tasks.test {
     }
 }
 
-// Publish resolved versions, so the POM pins jackson-databind 2.18.12 explicitly rather than
-// leaving it to the imported BOM.
+// Publish resolved dependency versions explicitly in the POM.
 publishing {
     publications.withType<MavenPublication>().configureEach {
         versionMapping {

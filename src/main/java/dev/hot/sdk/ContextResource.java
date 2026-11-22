@@ -1,9 +1,7 @@
 package dev.hot.sdk;
 
 import dev.hot.sdk.internal.Json;
-import dev.hot.sdk.internal.Responses;
 import dev.hot.sdk.internal.Transport;
-import java.net.http.HttpRequest.BodyPublishers;
 import java.util.Map;
 
 /** Manages encrypted project context variables. */
@@ -47,13 +45,8 @@ public final class ContextResource {
 
   /** Deletes a context variable. */
   public void delete(String project, String key) {
-    Responses.closeQuietly(
-        transport.requestRaw(
-            "DELETE",
-            projectPath(project) + "/context/" + Transport.enc(key),
-            null,
-            null,
-            BodyPublishers.noBody()));
+    transport.requestJson(
+        "DELETE", projectPath(project) + "/context/" + Transport.enc(key), null, null);
   }
 
   private String projectPath(String project) {

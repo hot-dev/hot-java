@@ -1,13 +1,28 @@
 package dev.hot.sdk;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.absent;
+import static com.github.tomakehurst.wiremock.client.WireMock.delete;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.put;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.github.tomakehurst.wiremock.WireMockServer;
+import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.http.HttpRequest.BodyPublishers;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -107,5 +122,129 @@ class AsyncClientTest {
         org.junit.jupiter.api.Assertions.assertThrows(
             Exception.class, () -> subscription.get(10, TimeUnit.SECONDS));
     assertTrue(error.getCause() instanceof HotApiException, String.valueOf(error.getCause()));
+  }
+
+  @Test
+  void asyncParityCoversStatusBlobsDownloadsSubscribePostRequestRawAndOrgEnv() throws Exception {
+    byte[] blobBytes = "blob-data".getBytes(StandardCharsets.UTF_8);
+    byte[] fileBytes = "file-data".getBytes(StandardCharsets.UTF_8);
+    byte[] buildBytes = "build-data".getBytes(StandardCharsets.UTF_8);
+
+    server.stubFor(
+        get(urlEqualTo("/status"))
+            .withHeader("Authorization", absent())
+            .willReturn(aResponse().withStatus(200).withBody("{\"status\":\"ok\"}")));
+    server.stubFor(
+        get(urlEqualTo("/v1/blobs/b1/download"))
+            .willReturn(aResponse().withStatus(200).withBody(blobBytes)));
+    server.stubFor(
+        get(urlEqualTo("/v1/files/f1/download"))
+            .willReturn(aResponse().withStatus(200).withBody(fileBytes)));
+    server.stubFor(
+        get(urlEqualTo("/v1/projects/p1/builds/b1/download"))
+            .willReturn(aResponse().withStatus(200).withBody(buildBytes)));
+    server.stubFor(
+        post(urlPathEqualTo("/v1/streams/s1/subscribe"))
+            .willReturn(ClientTest.sse("{\"type\":\"stream:complete\",\"stream_id\":\"s1\"}")));
+    server.stubFor(
+        get(urlPathEqualTo("/v1/raw-check"))
+            .willReturn(aResponse().withStatus(200).withBody("raw-ok")));
+    server.stubFor(
+        delete(urlPathEqualTo("/v1/orgs/o1/envs/e1/projects/p1"))
+            .willReturn(aResponse().withStatus(204)));
+    server.stubFor(
+        put(urlPathEqualTo("/v1/orgs/o1/envs/e1/projects/p1/context/k1"))
+            .willReturn(aResponse().withBody("{\"data\":{\"key\":\"k1\"},\"meta\":{}}")));
+    server.stubFor(
+        get(urlPathEqualTo("/v1/orgs/o1/envs/e1/projects/p1/builds/b1/download"))
+            .willReturn(aResponse().withStatus(200).withBody(buildBytes)));
+
+    AsyncHotClient a = async();
+    assertEquals("ok", a.status().get(10, TimeUnit.SECONDS).get("status"));
+
+    try (InputStream body = a.blobs().download("b1").get(10, TimeUnit.SECONDS).body()) {
+      assertArrayEquals(blobBytes, body.readAllBytes());
+    }
+    try (InputStream body = a.files().download("f1").get(10, TimeUnit.SECONDS).body()) {
+      assertArrayEquals(fileBytes, body.readAllBytes());
+    }
+    try (InputStream body = a.builds().download("p1", "b1").get(10, TimeUnit.SECONDS).body()) {
+      assertArrayEquals(buildBytes, body.readAllBytes());
+    }
+    List<String> postTypes = new ArrayList<>();
+    a.streams()
+        .subscribePost("s1", null, event -> postTypes.add(StreamEvents.typeOf(event)))
+        .get(10, TimeUnit.SECONDS);
+    assertEquals(List.of("stream:complete"), postTypes);
+
+    try (InputStream body =
+        a.requestRaw("GET", "/raw-check", null, null, BodyPublishers.noBody())
+            .get(10, TimeUnit.SECONDS)
+            .body()) {
+      assertEquals("raw-ok", new String(body.readAllBytes(), StandardCharsets.UTF_8));
+    }
+
+    AsyncHotClient.OrgEnv orgEnv = a.orgs().env("o1", "e1");
+    orgEnv.projects().delete("p1").get(10, TimeUnit.SECONDS);
+    assertEquals(
+        "k1",
+        orgEnv.context().update("p1", "k1", Map.of("value", "v")).get(10, TimeUnit.SECONDS).get("key"));
+    try (InputStream body = orgEnv.downloadBuild("p1", "b1").get(10, TimeUnit.SECONDS).body()) {
+      assertArrayEquals(buildBytes, body.readAllBytes());
+    }
+  }
+
+  @Test
+  void cancellingSubscriptionInterruptsBlockedConnectBeforeHeaders() throws Exception {
+    CountDownLatch accepted = new CountDownLatch(1);
+    CountDownLatch workerDone = new CountDownLatch(1);
+    try (ServerSocket listener = new ServerSocket(0, 5, InetAddress.getLoopbackAddress())) {
+      List<Socket> sockets = new ArrayList<>();
+      Thread acceptor =
+          new Thread(
+              () -> {
+                try {
+                  Socket s = listener.accept();
+                  sockets.add(s);
+                  accepted.countDown();
+                } catch (Exception ignored) {
+                }
+              });
+      acceptor.setDaemon(true);
+      acceptor.start();
+
+      HotClient hanging =
+          HotClient.builder("test-token")
+              .baseUrl("http://127.0.0.1:" + listener.getLocalPort())
+              .build();
+      AsyncHotClient async =
+          AsyncHotClient.wrap(
+              hanging,
+              task -> {
+                Thread t =
+                    new Thread(
+                        () -> {
+                          try {
+                            task.run();
+                          } finally {
+                            workerDone.countDown();
+                          }
+                        });
+                t.setDaemon(true);
+                t.start();
+              });
+
+      CompletableFuture<Void> sub = async.runs().subscribe("r1", event -> {});
+      assertTrue(accepted.await(5, TimeUnit.SECONDS), "server did not accept connection");
+
+      assertTrue(sub.cancel(true));
+      assertTrue(
+          workerDone.await(5, TimeUnit.SECONDS),
+          "worker thread should exit promptly after cancel(true) interrupts httpClient.send()");
+
+      for (Socket s : sockets) {
+        s.close();
+      }
+    }
   }
 }

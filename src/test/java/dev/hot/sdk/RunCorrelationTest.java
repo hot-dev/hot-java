@@ -408,4 +408,55 @@ class RunCorrelationTest {
     // The pending_retry failure is yielded but does not end the iterator; the retry's stop does.
     assertEquals(List.of("event:published null", "run:fail rA", "run:stop rB"), seen);
   }
+
+  @Test
+  void runFailWithRetryRunIdCorrelatesImmediatelyAndFlushesChunks() {
+    String failWithRetryId =
+        "{\"type\":\"run:fail\",\"retry_run_id\":\"rB\",\"run\":{\"run_id\":\"rA\","
+            + "\"event_id\":\"e1\",\"status\":\"pending_retry\",\"retry_attempt\":1}}";
+    callStream(
+        chunk("rB", "part1-"),
+        failWithRetryId,
+        chunk("rB", "part2"),
+        // rB omits origin_run_id: correlates solely via retry_run_id from run:fail.
+        run("run:stop", "rB", "e9", "succeeded", ",\"result\":\"done\""));
+
+    List<String> chunks = new ArrayList<>();
+    Object result =
+        client().events().callHot("demo/fn", List.of(), new CallOptions().onChunk(chunks::add));
+
+    assertEquals("done", result);
+    assertEquals(List.of("part1-", "part2"), chunks);
+  }
+
+  @Test
+  void subscribeWithEventDoesNotDedupePendingRetryBeforeLaterRunFail() {
+    String firstFail =
+        "{\"type\":\"run:fail\",\"run\":{\"run_id\":\"rA\",\"event_id\":\"e1\","
+            + "\"status\":\"pending_retry\",\"retry_attempt\":1}}";
+    String secondFail =
+        "{\"type\":\"run:fail\",\"retry_run_id\":\"rB\",\"run\":{\"run_id\":\"rA\","
+            + "\"event_id\":\"e1\",\"status\":\"pending_retry\",\"retry_attempt\":1}}";
+    callStream(
+        firstFail,
+        secondFail,
+        run("run:stop", "rB", "e9", "succeeded", ",\"result\":\"recovered\""));
+
+    List<String> seen = new ArrayList<>();
+    List<String> retryIds = new ArrayList<>();
+    try (StreamEvents events =
+        client().streams().subscribeWithEvent(Map.of("event_type", "x", "event_data", Map.of()))) {
+      events.forEachRemaining(
+          event -> {
+            seen.add(StreamEvents.typeOf(event) + " " + StreamEvents.runIdOf(event));
+            if (StreamEvents.retryRunIdOf(event) != null) {
+              retryIds.add(StreamEvents.retryRunIdOf(event));
+            }
+          });
+    }
+
+    assertEquals(
+        List.of("event:published null", "run:fail rA", "run:fail rA", "run:stop rB"), seen);
+    assertEquals(List.of("rB"), retryIds);
+  }
 }

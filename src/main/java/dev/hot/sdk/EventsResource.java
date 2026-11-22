@@ -30,14 +30,15 @@ public final class EventsResource {
    * unwrapping a {@code {"$ok": ...}} result value.
    */
   public Object callHot(String fn, List<Object> args, CallOptions options) {
+    CallOptions effective = options != null ? options : new CallOptions();
     Map<String, Object> run =
         RunWaiter.waitForCallResult(
             transport,
             fn,
             args == null ? List.of() : args,
-            options.timeout(),
-            options.onChunk(),
-            options.maxAttempts());
+            effective.timeout(),
+            effective.onChunk(),
+            effective.maxAttempts());
     return RunWaiter.extractRunResult(run.get("result"));
   }
 

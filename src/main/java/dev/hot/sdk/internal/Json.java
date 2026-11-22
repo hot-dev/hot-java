@@ -10,7 +10,7 @@ import java.util.Map;
 /** Internal JSON helpers. Not part of the public API. */
 public final class Json {
 
-  public static final ObjectMapper MAPPER = new ObjectMapper();
+  static final ObjectMapper MAPPER = new ObjectMapper();
 
   // Decodes every JSON number with a fraction or exponent as BigDecimal, so Hot Dec values and
   // user payloads keep all their digits. Integers still decode as Integer/Long/BigInteger.
@@ -51,7 +51,7 @@ public final class Json {
   /** Parses text as a JSON object, returning null for anything else. */
   @SuppressWarnings("unchecked")
   public static Map<String, Object> tryReadObject(String text, boolean bigDecimals) {
-    if (text == null || text.isEmpty()) {
+    if (text == null || text.isBlank()) {
       return null;
     }
     try {
@@ -73,7 +73,7 @@ public final class Json {
   /** {@link #envelope(String)}, optionally decoding floats as BigDecimal. */
   @SuppressWarnings("unchecked")
   public static Map<String, Object> envelope(String body, boolean bigDecimals) {
-    if (body == null || body.isEmpty()) {
+    if (body == null || body.isBlank()) {
       return wrapped(null);
     }
     Object parsed = read(body, bigDecimals);

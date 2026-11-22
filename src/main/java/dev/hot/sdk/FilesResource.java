@@ -36,9 +36,7 @@ public final class FilesResource {
 
   /** Deletes a file. */
   public void delete(String fileId) {
-    Responses.closeQuietly(
-        transport.requestRaw(
-            "DELETE", "/files/" + Transport.enc(fileId), null, null, BodyPublishers.noBody()));
+    transport.requestJson("DELETE", "/files/" + Transport.enc(fileId), null, null);
   }
 
   /**
@@ -99,12 +97,6 @@ public final class FilesResource {
 
   /** Cancels a multipart upload. */
   public void abortUpload(String uploadId) {
-    Responses.closeQuietly(
-        transport.requestRaw(
-            "DELETE",
-            "/files/uploads/" + Transport.enc(uploadId),
-            null,
-            null,
-            BodyPublishers.noBody()));
+    transport.requestJson("DELETE", "/files/uploads/" + Transport.enc(uploadId), null, null);
   }
 }

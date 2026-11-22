@@ -3,6 +3,7 @@ package dev.hot.sdk.internal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,12 +16,13 @@ import java.util.function.Consumer;
  * Tracks which runs on a stream belong to one published event and when that event's result is
  * final. Not part of the public API. Mirrors hot-rust's {@code RunTracker}.
  *
- * <p>A run is tied to the event when its {@code event_id} matches, or when its {@code
- * origin_run_id} names a tied run of the same {@code run_type}: a handler's retry runs get a new
- * event id and link back only through {@code origin_run_id}. Task runs a run starts also name it
- * as their origin, but with {@code run_type} "task", so they never tie. A run event whose origin
- * is not tied yet is kept as an orphan keyed by that origin, and replayed once the origin ties
- * (the API's poll replays newest runs first).
+ * <p>A run is tied to the event when its {@code event_id} matches, when an earlier tied {@code
+ * run:fail} named it as {@code retry_run_id}, or when its {@code origin_run_id} names a tied run
+ * of the same {@code run_type}: a handler's retry runs get a new event id and link back through
+ * {@code origin_run_id} and {@code retry_run_id}. Task runs a run starts also name it as their
+ * origin, but with {@code run_type} "task", so they never tie. A run event whose origin is not
+ * tied yet is kept as an orphan keyed by that origin, and replayed once the origin ties (the
+ * API's poll replays newest runs first).
  *
  * <p>The API replays a retried first attempt lossily: as {@code run:fail} or even {@code
  * run:stop} with status {@code pending_retry}, or, after the retry is queued but before its run
@@ -28,8 +30,8 @@ import java.util.function.Consumer;
  *
  * <ul>
  *   <li>{@code pending_retry} is never final, whatever the event type.
- *   <li>A tied run that another tied run (or an orphan) names as its origin was retried; its
- *       {@code run:fail} is not final.
+ *   <li>A tied run that another tied run (or an orphan) names as its origin, or whose {@code
+ *       run:fail} names a {@code retry_run_id}, was retried; its {@code run:fail} is not final.
  *   <li>A tied {@code run:fail} with status {@code failed} and a {@code retry_attempt} above its
  *       base (0, or its origin's highest {@code retry_attempt}) is held for {@link #GRACE_NANOS}: it
  *       stands only if no run naming it as origin appears by then, or by the caller's deadline.
@@ -43,8 +45,9 @@ final class RunCorrelation {
   /** How long a failure that announced a retry waits for the retry run. */
   static final long GRACE_NANOS = TimeUnit.SECONDS.toNanos(5);
 
-  // Bounds memory for chunks of runs that never tie (other events on a shared stream).
+  // Bounds memory for chunks and orphans of unrelated runs on a busy shared stream.
   private static final int MAX_BUFFERED_CHUNKS = 10_000;
+  static final int MAX_ORPHANS = 10_000;
 
   /** What a run event means for the published event. */
   enum Kind {
@@ -65,26 +68,35 @@ final class RunCorrelation {
     }
   }
 
-  private record Orphan(String type, Map<String, Object> run) {}
+  private record Orphan(String type, Map<String, Object> run, String retryRunId) {}
 
   private record PendingFailure(String runId, long until, Map<String, Object> run) {}
 
   private final Consumer<String> onChunk;
+  private final long graceNanos;
   private String eventId;
   // Tied runs and the highest retry_attempt seen for each.
   private final Map<String, Long> runs = new HashMap<>();
   // run_type of each tied run (null when the API sent none).
   private final Map<String, Object> runTypes = new HashMap<>();
-  // Tied runs that a tied retry run names as its origin.
+  // Parent run id recorded when a run:fail names a retry_run_id.
+  private final Map<String, String> retryOrigins = new HashMap<>();
+  // Tied runs that a tied retry run names as its origin (or whose run:fail named retry_run_id).
   private final Set<String> retried = new HashSet<>();
-  private final Map<String, List<Orphan>> orphans = new HashMap<>();
+  private final Map<String, List<Orphan>> orphans = new LinkedHashMap<>();
+  private int orphanCount;
   private final Map<String, List<String>> buffered = new LinkedHashMap<>();
   private int bufferedCount;
   private PendingFailure pending;
 
   RunCorrelation(String eventId, Consumer<String> onChunk) {
+    this(eventId, onChunk, GRACE_NANOS);
+  }
+
+  RunCorrelation(String eventId, Consumer<String> onChunk, long graceNanos) {
     this.eventId = eventId;
     this.onChunk = onChunk;
+    this.graceNanos = graceNanos;
   }
 
   String eventId() {
@@ -93,6 +105,11 @@ final class RunCorrelation {
 
   void eventId(String eventId) {
     this.eventId = eventId;
+  }
+
+  /** Package-private count of buffered orphans, for cap tests. */
+  int orphanCount() {
+    return orphanCount;
   }
 
   /**
@@ -120,33 +137,37 @@ final class RunCorrelation {
 
   /** Handles a run event ({@code run:start}, {@code run:stop}, {@code run:fail}, {@code run:cancel}). */
   Outcome runEvent(String type, Map<String, Object> run) {
+    return runEvent(type, run, null);
+  }
+
+  /**
+   * Handles a run event, optionally carrying {@code retry_run_id} from a {@code run:fail} event so
+   * the retry run correlates immediately.
+   */
+  Outcome runEvent(String type, Map<String, Object> run, String retryRunId) {
     if (run == null || !(run.get("run_id") instanceof String runId)) {
       return Outcome.CONTINUE;
     }
     String origin = origin(run);
-    if (!ties(run)) {
+    if (!ties(runId, run)) {
       if (origin != null && !runs.containsKey(origin)) {
-        orphans.computeIfAbsent(origin, ignored -> new ArrayList<>()).add(new Orphan(type, run));
+        recordOrphan(origin, new Orphan(type, run, retryRunId));
       }
       return Outcome.CONTINUE;
     }
     long attempt = retryAttempt(run);
-    List<Orphan> waiting = List.of();
+    List<Orphan> waiting = new ArrayList<>();
     Long seen = runs.get(runId);
     if (seen != null) {
       runs.put(runId, Math.max(seen, attempt));
+      if (run.get("run_type") != null && runTypes.get(runId) == null) {
+        runTypes.put(runId, run.get("run_type"));
+      }
     } else {
       runs.put(runId, attempt);
       runTypes.put(runId, run.get("run_type"));
       flush(runId);
-      List<Orphan> found = orphans.remove(runId);
-      if (found != null) {
-        waiting = found;
-        if (found.stream().anyMatch(orphan -> sameType(orphan.run, runId))) {
-          // A retry of this run is already on the stream.
-          retried.add(runId);
-        }
-      }
+      collectOrphans(runId, waiting);
     }
     if (origin != null) {
       retried.add(origin);
@@ -154,17 +175,52 @@ final class RunCorrelation {
         pending = null;
       }
     }
+    if (retryRunId != null && !retryRunId.isEmpty()) {
+      retried.add(runId);
+      if (pending != null && pending.runId.equals(runId)) {
+        pending = null;
+      }
+      retryOrigins.put(retryRunId, runId);
+      if (!runs.containsKey(retryRunId)) {
+        runs.put(retryRunId, attempt);
+        runTypes.put(retryRunId, runTypes.get(runId));
+        flush(retryRunId);
+        collectOrphans(retryRunId, waiting);
+      }
+    }
     Outcome outcome = outcome(type, runId, run);
     if (outcome.isFinal()) {
       return outcome;
     }
     for (Orphan orphan : waiting) {
-      Outcome replayed = runEvent(orphan.type, orphan.run);
+      Outcome replayed = runEvent(orphan.type, orphan.run, orphan.retryRunId);
       if (replayed.isFinal()) {
         return replayed;
       }
     }
     return Outcome.CONTINUE;
+  }
+
+  private void recordOrphan(String origin, Orphan orphan) {
+    while (orphanCount >= MAX_ORPHANS && !orphans.isEmpty()) {
+      Iterator<Map.Entry<String, List<Orphan>>> eldest = orphans.entrySet().iterator();
+      orphanCount -= eldest.next().getValue().size();
+      eldest.remove();
+    }
+    orphans.computeIfAbsent(origin, ignored -> new ArrayList<>()).add(orphan);
+    orphanCount++;
+  }
+
+  private void collectOrphans(String runId, List<Orphan> waiting) {
+    List<Orphan> found = orphans.remove(runId);
+    if (found != null) {
+      orphanCount -= found.size();
+      waiting.addAll(found);
+      if (found.stream().anyMatch(orphan -> sameType(orphan.run, runId))) {
+        // A retry of this run is already on the stream.
+        retried.add(runId);
+      }
+    }
   }
 
   private Outcome outcome(String type, String runId, Map<String, Object> run) {
@@ -183,10 +239,13 @@ final class RunCorrelation {
         // retry_attempt goes up when a retry is scheduled; a run's own attempt number is its
         // origin's (0 for the first attempt).
         String origin = origin(run);
+        if (origin == null) {
+          origin = retryOrigins.get(runId);
+        }
         long base = origin != null && runs.containsKey(origin) ? runs.get(origin) : 0;
         if (retryAttempt(run) > base) {
           if (pending == null) {
-            pending = new PendingFailure(runId, System.nanoTime() + GRACE_NANOS, run);
+            pending = new PendingFailure(runId, System.nanoTime() + graceNanos, run);
           }
           return Outcome.CONTINUE;
         }
@@ -196,7 +255,10 @@ final class RunCorrelation {
     }
   }
 
-  private boolean ties(Map<String, Object> run) {
+  private boolean ties(String runId, Map<String, Object> run) {
+    if (runs.containsKey(runId)) {
+      return true;
+    }
     boolean byEvent = eventId != null && eventId.equals(run.get("event_id"));
     String origin = origin(run);
     return byEvent || (origin != null && runs.containsKey(origin) && sameType(run, origin));

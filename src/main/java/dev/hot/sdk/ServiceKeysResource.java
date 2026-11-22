@@ -1,9 +1,7 @@
 package dev.hot.sdk;
 
 import dev.hot.sdk.internal.Json;
-import dev.hot.sdk.internal.Responses;
 import dev.hot.sdk.internal.Transport;
-import java.net.http.HttpRequest.BodyPublishers;
 import java.util.Map;
 
 /** Creates and revokes scoped service keys. */
@@ -45,10 +43,7 @@ public final class ServiceKeysResource {
 
   /** Revokes one service key. */
   public void revoke(String serviceKeyId) {
-    Responses.closeQuietly(
-        transport.requestRaw(
-            "DELETE", "/service-keys/" + Transport.enc(serviceKeyId), null, null,
-            BodyPublishers.noBody()));
+    transport.requestJson("DELETE", "/service-keys/" + Transport.enc(serviceKeyId), null, null);
   }
 
   /** Revokes every service key. */

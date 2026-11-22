@@ -12,7 +12,10 @@ public final class WaitOptions {
 
   /** Bounds the wait (default 60 seconds). */
   public WaitOptions timeout(Duration timeout) {
-    this.timeout = timeout;
+    if (timeout != null && (timeout.isZero() || timeout.isNegative())) {
+      throw new IllegalArgumentException("timeout must be positive");
+    }
+    this.timeout = timeout == null ? Duration.ofSeconds(60) : timeout;
     return this;
   }
 
